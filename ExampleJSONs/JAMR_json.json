@@ -1,0 +1,178 @@
+{
+  "meta": {
+    "title": "Maxent-R Species Distribution Modeling System",
+    "categories": {
+      "gui": "#3498db",
+      "io": "#e74c3c",
+      "workflow": "#2ecc71",
+      "model": "#f39c12",
+      "utility": "#9b59b6",
+      "integration": "#1abc9c"
+    }
+  },
+  "nodes": [
+    {
+      "id": "MaxentRSystemGUI",
+      "file": "MaxentRSystemGUI.java",
+      "category": "gui",
+      "summary": "Main GUI application for the automated Maxent-R species distribution modeling workflow.",
+      "description": "Provides a tabbed interface for configuring input data, geographic extent, model parameters, and step selection. Allows users to process species occurrence data through an automated pipeline involving data clipping, duplicate removal, model training, and variable selection. Implements progress tracking through the ProgressCallback interface.",
+      "extends": "JFrame",
+      "implements": ["ProgressCallback"],
+      "methods": [
+        {"signature": "void updateProgress(int step, String stepName)", "description": "Updates the progress bar and label during workflow execution."},
+        {"signature": "void processData()", "description": "Executes the main data processing workflow based on user configuration."},
+        {"signature": "boolean validateInputs()", "description": "Validates all user input fields before processing."},
+        {"signature": "void saveSettings()", "description": "Saves current GUI settings to a properties file."},
+        {"signature": "void loadSettings()", "description": "Loads previously saved settings from a properties file."}
+      ]
+    },
+    {
+      "id": "ProjectManager",
+      "file": "ProjectManager.java",
+      "category": "workflow",
+      "summary": "Orchestrates the complete Maxent-R workflow by executing configured analysis steps sequentially.",
+      "description": "Manages the execution of up to 13 analysis steps including location data retrieval, duplicate removal, spatial extent definition, global model runs, variable identification, correlation calculation, permutation generation, and final model optimization. Coordinates between RIntegration, MaxentCaller, PathManager, and CSVPermutationAnalyzer to complete the workflow.",
+      "methods": [
+        {"signature": "void runMethodology(WorkflowConfiguration config, ProgressCallback callback)", "description": "Executes the workflow based on the provided configuration with progress callbacks."},
+        {"signature": "void step6_RunGlobalModel(Step6Config config)", "description": "Runs the global Maxent model with all environmental variables."},
+        {"signature": "void step7_IdentifyTopVariables(Step7Config config)", "description": "Identifies the most important environmental variables based on permutation importance."},
+        {"signature": "void step10_RunAllPermutations(Step10Config config)", "description": "Executes Maxent for all variable combinations."},
+        {"signature": "void step12_OptimizeRegularization(Step12Config config)", "description": "Optimizes the beta multiplier regularization parameter."}
+      ]
+    },
+    {
+      "id": "WorkflowConfiguration",
+      "file": "WorkflowConfiguration.java",
+      "category": "model",
+      "summary": "Immutable configuration object holding all step configurations for the workflow.",
+      "description": "Built using the Builder pattern, encapsulates configuration for all 13 workflow steps. Provides validation for all step configurations to ensure parameters are within valid ranges. Each step configuration can be independently enabled or disabled.",
+      "methods": [
+        {"signature": "void validateAll()", "description": "Validates all step configurations and throws exception if any are invalid."},
+        {"signature": "Step1Config getStep1()", "description": "Returns the Step 1 configuration for location data processing."},
+        {"signature": "Step7Config getStep7()", "description": "Returns the Step 7 configuration for variable selection."}
+      ]
+    },
+    {
+      "id": "StepConfig",
+      "file": "StepConfig.java",
+      "category": "model",
+      "summary": "Base interface and implementations for individual workflow step configurations.",
+      "description": "Defines the common interface for all step configuration classes with enabled status and validation. Contains implementations for Step1Config through Step13Config, each with specific parameters for their respective workflow steps. Each configuration validates its parameters such as thresholds, file paths, and numeric ranges.",
+      "methods": [
+        {"signature": "boolean isEnabled()", "description": "Returns whether this step should be executed in the workflow."},
+        {"signature": "void validate()", "description": "Validates the step configuration parameters and throws exception if invalid."}
+      ]
+    },
+    {
+      "id": "ProgressCallback",
+      "file": "ProgressCallback.java",
+      "category": "model",
+      "summary": "Interface for communicating workflow progress updates to the GUI.",
+      "description": "Defines a single method for updating progress information including the current step number and description. Implemented by MaxentRSystemGUI to display progress in the UI.",
+      "methods": [
+        {"signature": "void updateProgress(int step, String stepName)", "description": "Notifies the implementer of the current workflow step and its description."}
+      ]
+    },
+    {
+      "id": "RIntegration",
+      "file": "RIntegration.java",
+      "category": "integration",
+      "summary": "Integrates with R statistical software by executing R scripts for spatial analysis.",
+      "description": "Provides methods to execute various R scripts for trimming duplicates, calculating correlation, generating variable combinations, performing model selection, and clipping rasters. Automatically detects R installation on the system. Contains inner classes ProcessBasedR for script execution and RResult for capturing outputs.",
+      "methods": [
+        {"signature": "void trimDupes(String species)", "description": "Removes duplicate occurrence records using R."},
+        {"signature": "void correlation(String maxentResultPath, double threshold, int count, String speciesPath)", "description": "Calculates correlation between environmental variables using R."},
+        {"signature": "void combos(double threshold, String csvPath, String modelPath)", "description": "Generates variable combinations for permutation testing."},
+        {"signature": "void clipRasters(String envPath, String bounds, String outputPath)", "description": "Clips environmental raster layers to specified geographic bounds."}
+      ]
+    },
+    {
+      "id": "MaxentCaller",
+      "file": "MaxentCaller.java",
+      "category": "integration",
+      "summary": "Executes the MaxEnt species distribution modeling software via command-line interface.",
+      "description": "Builds and executes MaxEnt commands with various parameters including environmental layers, occurrence data, output directories, regularization multipliers, and projection layers. Captures output from the MaxEnt process and handles success or failure. Contains inner class MaxentConfig for managing configuration.",
+      "methods": [
+        {"signature": "String main(String speciesPath, String[] args)", "description": "Executes MaxEnt with the specified species file and arguments."},
+        {"signature": "void Maxent(String speciesPath, String[] args)", "description": "Convenience method to run MaxEnt analysis."},
+        {"signature": "String[] getFolderNames(String directory)", "description": "Returns names of all subdirectories in the specified directory."},
+        {"signature": "String[] getFileNames(String directory)", "description": "Returns names of all files in the specified directory."}
+      ]
+    },
+    {
+      "id": "ScriptEditor",
+      "file": "ScriptEditor.java",
+      "category": "integration",
+      "summary": "Edits R script templates by replacing placeholders with actual file paths and parameters.",
+      "description": "Loads R script templates, performs find-and-replace operations to customize them with project-specific paths and parameters, and writes the edited scripts to disk. Supports scripts for trimming duplicates, correlation analysis, generating combinations, model selection, raster clipping, and shapefile operations.",
+      "methods": [
+        {"signature": "String editTrimDupes(String pathA, String speciesA, String pathB, String output, boolean useCustomName)", "description": "Creates a custom R script for removing duplicate occurrence points."},
+        {"signature": "String editCorrelation(String pathA, double threshold, int count, String outputPath)", "description": "Creates a custom R script for calculating variable correlation."},
+        {"signature": "String editCombos(double threshold, String csvPath, String modelPath)", "description": "Creates a custom R script for generating variable combinations."},
+        {"signature": "String editClipRasters(String envPath, String bounds, String outputPath)", "description": "Creates a custom R script for clipping environmental raster layers."}
+      ]
+    },
+    {
+      "id": "PathManager",
+      "file": "PathManager.java",
+      "category": "utility",
+      "summary": "Manages and provides access to all file paths used throughout the application.",
+      "description": "Initializes and maintains paths for species data, CSV files, clipped layers, models, correlation files, shapefiles, and masks. Saves path information to a file for persistence across R and Java components. Provides static getter methods for accessing paths from anywhere in the application.",
+      "methods": [
+        {"signature": "PathManager(String speciesFilePath)", "description": "Initializes all project paths based on the species file location."},
+        {"signature": "String getSpeciesPath()", "description": "Returns the path to the species occurrence CSV file."},
+        {"signature": "String getLayersPath()", "description": "Returns the path to the clipped environmental layers directory."},
+        {"signature": "String getModelsPath()", "description": "Returns the path to the models output directory."},
+        {"signature": "String trimDupePath()", "description": "Updates the species name to include trimmed suffix and saves paths."}
+      ]
+    },
+    {
+      "id": "CSVPermutationAnalyzer",
+      "file": "CSVPermutationAnalyzer.java",
+      "category": "io",
+      "summary": "Analyzes CSV files to extract permutation importance values and identify best models.",
+      "description": "Provides utilities for reading CSV files containing MaxEnt results, extracting top variables by permutation importance, finding models with lowest AIC/AICc/BIC scores, and managing CSV file operations. Also includes directory management functions for creating, clearing, and deleting folders.",
+      "methods": [
+        {"signature": "String[] getTopPermutationImportance(String csvFilePath, double threshold, int topCount)", "description": "Returns the top N variables exceeding the permutation importance threshold."},
+        {"signature": "String findLowestScoreVariables(String csvFilePath, String selectionType)", "description": "Identifies the model with the lowest AIC, AICc, or BIC score."},
+        {"signature": "void addToFirstEmptyRow(String filePath, String[] data)", "description": "Appends data to the first empty row in a CSV file."},
+        {"signature": "boolean clearDirectory(String directoryPathString)", "description": "Deletes all contents of a directory without removing the directory itself."},
+        {"signature": "void refreshCSV(String path)", "description": "Clears or creates a CSV file at the specified path."}
+      ]
+    },
+    {
+      "id": "CSVSpeciesExtractor",
+      "file": "CSVSpeciesExtractor.java",
+      "category": "io",
+      "summary": "Extracts species occurrence data from tab-delimited files and creates individual CSV files per species.",
+      "description": "Parses large GBIF occurrence data files, groups records by species name, and writes separate CSV files for each species containing only latitude and longitude coordinates. Handles special characters in species names and provides clean file naming.",
+      "methods": [
+        {"signature": "String processCSVFile(String inputFilePath, boolean isTemp)", "description": "Processes a tab-delimited file and creates individual species CSV files."},
+        {"signature": "void main(String[] args)", "description": "Command-line entry point for the extractor."}
+      ]
+    }
+  ],
+  "edges": [
+    {"source": "MaxentRSystemGUI", "target": "ProgressCallback", "type": "implements"},
+    {"source": "MaxentRSystemGUI", "target": "ProjectManager", "type": "calls"},
+    {"source": "MaxentRSystemGUI", "target": "WorkflowConfiguration", "type": "uses"},
+    {"source": "MaxentRSystemGUI", "target": "PathManager", "type": "uses"},
+    {"source": "MaxentRSystemGUI", "target": "RIntegration", "type": "uses"},
+    {"source": "MaxentRSystemGUI", "target": "CSVSpeciesExtractor", "type": "calls"},
+    {"source": "ProjectManager", "target": "WorkflowConfiguration", "type": "uses"},
+    {"source": "ProjectManager", "target": "StepConfig", "type": "uses"},
+    {"source": "ProjectManager", "target": "ProgressCallback", "type": "uses"},
+    {"source": "ProjectManager", "target": "PathManager", "type": "uses"},
+    {"source": "ProjectManager", "target": "RIntegration", "type": "uses"},
+    {"source": "ProjectManager", "target": "MaxentCaller", "type": "uses"},
+    {"source": "ProjectManager", "target": "CSVPermutationAnalyzer", "type": "calls"},
+    {"source": "WorkflowConfiguration", "target": "StepConfig", "type": "uses"},
+    {"source": "RIntegration", "target": "ScriptEditor", "type": "uses"},
+    {"source": "RIntegration", "target": "PathManager", "type": "uses"},
+    {"source": "ScriptEditor", "target": "PathManager", "type": "uses"},
+    {"source": "ScriptEditor", "target": "CSVPermutationAnalyzer", "type": "calls"},
+    {"source": "MaxentCaller", "target": "PathManager", "type": "uses"},
+    {"source": "CSVPermutationAnalyzer", "target": "PathManager", "type": "uses"}
+  ]
+}

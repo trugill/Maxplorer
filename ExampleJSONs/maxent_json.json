@@ -1,0 +1,4290 @@
+{
+  "nodes": [
+    {
+      "id": "Runner",
+      "file": "density/Runner.java",
+      "category": "core-math",
+      "summary": "Top-level training orchestrator for a Maxent run.",
+      "description": "Loads occurrence and background data, applies CV/bootstrap/subsample replication, builds base features from grids via Extractor, expands them into linear/quadratic/product/threshold/hinge features, runs Sequential to optimise lambdas, then writes the .lambdas file, projects predictions, computes AUC, runs jackknife and permutation-importance analyses, and emits per-species HTML reports.",
+      "extends": "Object",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "void start()",
+          "description": "Entry point. Parses params, initialises grids via initializeGrids(), splits samples for replicates, then for each species calls maxentRun() and writes outputs."
+        },
+        {
+          "signature": "GridSet initializeGrids()",
+          "description": "Builds an Extractor (or GridSetFromFile for SWD) that reads environmental layers, training samples and test samples, plus optional bias grid. Returns the populated GridSet."
+        },
+        {
+          "signature": "MaxentRunResults maxentRun(Feature[] features, Sample[] ss, Sample[] testSamples)",
+          "description": "Constructs a FeaturedSpace from features and samples, hands it to Sequential.run() which iteratively updates lambdas, returns gain + iterations + FeaturedSpace."
+        },
+        {
+          "signature": "Feature[] makeFeatures(Feature[] f1)",
+          "description": "From raw layer features, builds the full feature set: binary expansions of categorical layers, linear/quadratic/product/threshold/hinge generators on continuous ones, with naturalClamp on linear features."
+        },
+        {
+          "signature": "double[][] jackknifeGain(Feature[] baseFeatures, Sample[] ss, Sample[] testSamples, double allGain, double allTestGain, double allauc)",
+          "description": "For each predictor: trains a model with it omitted and one with it alone; records training gain, test gain and test AUC for the jackknife plots that quantify variable importance."
+        },
+        {
+          "signature": "double[][] writeCumulativeIndex(double[] weights, String raw2cumfile, FeaturedSpace X, double auc, double trainauc, Feature[] baseFeatures, double entropy)",
+          "description": "Sorts the background raw outputs and accumulates the cumulative distribution. Writes the omission file giving (raw, cumulative, occurrence-probability, area, train-omission, test-omission) for every threshold, and computes 9–11 threshold rules (fixed cumulative, equal sensitivity/specificity, max sens+spec, etc)."
+        },
+        {
+          "signature": "static double[][] responsePlotData(Grid projgrid, HashMap map, String var, double min, double max, double[] categories, boolean exponent)",
+          "description": "Computes a 1-D response curve: holds all other variables at their sample-mean and sweeps one variable across its range, querying the projected grid at each sample value."
+        },
+        {
+          "signature": "void createProfiles(Feature[] baseFeatures, String lambdafile, Sample[] samples)",
+          "description": "Builds and writes response-curve PNGs and per-variable .dat files via ResponsePlot, using the mean sample values as the holding context."
+        },
+        {
+          "signature": "void writeContributions(double[][] contributions, String msg)",
+          "description": "Writes the percent-contribution table comparing gain-based contributions to PermutationImportance results into the HTML and maxentResults.csv."
+        },
+        {
+          "signature": "void end()",
+          "description": "Closes the results CSV, the HTML, the log, and the progress monitor."
+        }
+      ]
+    },
+    {
+      "id": "Sequential",
+      "file": "density/Sequential.java",
+      "category": "core-math",
+      "summary": "Core L1-regularised maximum-entropy optimizer.",
+      "description": "Implements the sequential coordinate-descent / Newton optimisation of the Maxent log-likelihood with L1 regularisation. Each iteration picks the feature with the largest delta-loss bound, computes a Newton step (or a search step for non-binary features), and updates lambdas, density and linearPredictor. Periodically performs a parallel Newton update over recently changed features. Stops when per-iteration loss drop falls below convergenceThreshold or after maxIterations.",
+      "extends": "Object",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "double run()",
+          "description": "Main loop. For iter = 0..maxIterations: either calls doParallelUpdate (every parallelUpdateFrequency iters) or picks getBestFeature() and calls doSequentialUpdate; tests termination via terminationTest. Returns final regularised loss."
+        },
+        {
+          "signature": "Feature getBestFeature()",
+          "description": "Scans all active features and all FeatureGenerators, returning the one whose deltaLossBound(h) is most negative — i.e. the feature predicted to reduce loss the most for an optimal step."
+        },
+        {
+          "signature": "double deltaLossBound(Feature h)",
+          "description": "Computes the closed-form upper bound on loss reduction achievable by adding alpha*h: -N1*alpha + log(W0 + W1*exp(alpha)) + beta1*(|lambda+alpha|-|lambda|), evaluated at the analytic optimal alpha returned by goodAlpha."
+        },
+        {
+          "signature": "double goodAlpha(Feature h)",
+          "description": "Closed-form optimum step for a single binary-style coordinate: alpha = log((N1-beta1)*W0 / ((N0+beta1)*W1)) (or its sign-flipped variant), clipped so it doesn't cross zero into the wrong L1 quadrant."
+        },
+        {
+          "signature": "double newtonStep(Feature h)",
+          "description": "Newton step in direction of unit vector at h: stepSize = -deriv(h) / uTHu, where uTHu is the variance of h under the current density. Clamped so lambda does not change sign."
+        },
+        {
+          "signature": "double newtonStep(double[] u)",
+          "description": "Newton step in an arbitrary direction u over the active features: computes the model-density-weighted u^T H u and uses stepSize = -deriv·u / u^T H u, clipped per-coordinate at the L1 zero crossings. Used by doParallelUpdate."
+        },
+        {
+          "signature": "double doParallelUpdate(int interval)",
+          "description": "Builds the direction u as the previous-iteration lambda increments, takes a Newton step in that direction over all features, and reverts if loss did not decrease. Attributes the per-feature contribution share proportional to recent deltaContribution."
+        },
+        {
+          "signature": "double doSequentialUpdate(Feature h)",
+          "description": "Performs the per-feature update: for binary features uses goodAlpha; for continuous uses newtonStep with line-search fallback if the delta-loss bound is violated, then increaseLambda + setDensity update. Bookkeeps h.contribution."
+        },
+        {
+          "signature": "double searchAlpha(Feature h, double alpha)",
+          "description": "Backtracking search: doubles alpha while newLossChange keeps decreasing, then takes one extra factor-2 step if it still improves. Used when Newton's prediction overshoots the L1-regularised loss."
+        },
+        {
+          "signature": "double newLossChange(Feature h, double alpha, int square)",
+          "description": "Evaluates the exact one-step change in loss if h.lambda += alpha: -alpha*N1 + log(sum density*exp(alpha*h)) + beta*(|lambda+alpha|-|lambda|)."
+        },
+        {
+          "signature": "double deriv(Feature h)",
+          "description": "Sub-gradient of regularised loss with respect to h.lambda: (W1 - N1) ± beta, with the sign chosen by current sign(lambda) or the active sub-gradient at zero."
+        },
+        {
+          "signature": "Feature[] featuresToUpdate()",
+          "description": "Selects which features get their expectation refreshed this iteration: recently-changed features, the round-robin slice, and the top-K by deltaLossBound."
+        },
+        {
+          "signature": "boolean terminationTest(double newLoss)",
+          "description": "Every convergenceTestFrequency=20 iterations, stops when (previousLoss - newLoss) < terminationThreshold, or if gain exceeds 10000 (numerical safety)."
+        }
+      ]
+    },
+    {
+      "id": "FeaturedSpace",
+      "file": "density/FeaturedSpace.java",
+      "category": "core-math",
+      "summary": "Holds features, lambdas, linear predictor and density over background points.",
+      "description": "The state object for the Maxent model. Maintains linearPredictor[i] = Σⱼ λⱼ·fⱼ(i), the linearPredictorNormalizer = max_i linearPredictor (for numerical safety), density[i] = bias(i)·exp(linearPredictor[i] − normalizer), and densityNormalizer = Σ density[i]. Computes feature sample expectations with sub-sampling deviations β, handles bias-as-prior, and provides AUC, entropy, prevalence, training/test loss.",
+      "extends": "Object",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "FeaturedSpace(Sample[] samples, Feature[] f, Params params)",
+          "description": "Builds the space from features and samples. Sorts features into linear/binary/threshold-generator/hinge-generator/bias buckets, initialises bias-divisor and bias-distribution, then sets sample expectations and the initial linearPredictor/density arrays."
+        },
+        {
+          "signature": "FeaturedSpace(GridSet gs, String lambdaFile, boolean clamp, boolean renormalize)",
+          "description": "Reconstructs a trained model from a .lambdas file: parses each feature description (product, square, polyhedral, binary '=', threshold '<', hinge '\\'' or '`', or linear), looks up the underlying base Feature in the GridSet, applies ClampedFeature wrappers and recomputes the density."
+        },
+        {
+          "signature": "void increaseLambda(Feature h, double alpha, Feature[] updateFeatures)",
+          "description": "Increments h.lambda by alpha, updates linearPredictor[i] += alpha·h.eval(i) for all i, recomputes linearPredictorNormalizer = max linearPredictor, then setDensity() refreshes density and the expectations of updateFeatures."
+        },
+        {
+          "signature": "void setDensity(Feature[] toUpdate)",
+          "description": "Recomputes density[i] = biasDist(i)·exp(linearPredictor[i] − normalizer), accumulates densityNormalizer = Σ density[i], and for each f in toUpdate sets f.expectation = (Σ density[i]·f.eval(i)) / densityNormalizer."
+        },
+        {
+          "signature": "void setLinearPredictor(boolean report)",
+          "description": "Recomputes the linear predictor from scratch: linearPredictor[i] = Σⱼ λⱼ·fⱼ.eval(i), then calls setLinearPredictorNormalizer to capture the max."
+        },
+        {
+          "signature": "void setSampleExpectations()",
+          "description": "For each feature f, computes (avg, std, min, max) of f/biasDiv at the samples, then sets f.sampleExpectation = midpoint and f.sampleDeviation = beta·std/√m (the half-width of the confidence interval for the empirical mean), with floor minDeviation. Inactivates features with 0 sample data."
+        },
+        {
+          "signature": "double getAUC(DoubleIterator backgroundIterator, Sample[] ss)",
+          "description": "Computes the area-under-ROC of model density against the given samples vs the background distribution. Uses the DeLong et al. 1988 unbiased estimator (their equation 2) to also compute aucSD."
+        },
+        {
+          "signature": "double getEntropy()",
+          "description": "Computes − Σᵢ pᵢ log pᵢ where pᵢ = density[i]/densityNormalizer, the entropy of the fitted distribution used to convert raw → logistic/cloglog."
+        },
+        {
+          "signature": "double getPrevalence(Params params)",
+          "description": "Returns the average occurrence probability over background points: (1/N) Σ τ(density[i]/Z, entropy), with τ either logistic or cloglog."
+        },
+        {
+          "signature": "double getLoss()",
+          "description": "Returns −Σⱼ λⱼ·π̃[fⱼ] + linearPredictorNormalizer + log(densityNormalizer), the regularised maximum-likelihood objective Sequential is minimising."
+        },
+        {
+          "signature": "double getL1reg()",
+          "description": "Returns Σⱼ |λⱼ|·βⱼ, the L1 regularisation penalty."
+        },
+        {
+          "signature": "void writeFeatureWeights(String outFile)",
+          "description": "Writes the .lambdas file: one line per feature with name, lambda, min, max — plus linearPredictorNormalizer, densityNormalizer, numBackgroundPoints, entropy."
+        }
+      ]
+    },
+    {
+      "id": "SortedFeatureGenerator",
+      "file": "density/SortedFeatureGenerator.java",
+      "category": "core-math",
+      "summary": "Base class for threshold/hinge knot placement — sorts background+samples by feature value.",
+      "description": "Pre-sorts the union of background points and samples by feature value, collapses near-duplicates within a precision bound to give a set of candidate threshold positions thr[]. Subclasses ThrFeatureGenerator and HingeFeatureGenerator use this index to compute sample expectations and feature expectations for every candidate threshold in linear-in-N passes.",
+      "extends": "Object",
+      "implements": [
+        "FeatureGenerator"
+      ],
+      "methods": [
+        {
+          "signature": "SortedFeatureGenerator(Sample[] samples_init, Feature feature_init)",
+          "description": "Caches feature values for all background points and samples, sorts the combined index by feature value, walks the sorted list to find distinct thresholds (separated by at least the auto-detected numerical precision), and records the mapping val↔threshold."
+        },
+        {
+          "signature": "abstract double featureEval(int thrIndex, int i)",
+          "description": "Evaluates the synthetic feature at threshold thrIndex at background point i — overridden by Thr/Hinge generators."
+        },
+        {
+          "signature": "Feature toFeature(int thrIndex)",
+          "description": "Returns an on-demand Feature wrapper backed by this generator at the given threshold, sharing lambda/expectation bookkeeping with the generator."
+        },
+        {
+          "signature": "static double precision(double f)",
+          "description": "Returns the smallest power-of-ten threshold-spacing required to distinguish f from a nearby value, by walking up to maxDigits significant digits and looking for 00/01/98/99 trailing pairs (floating-point rounding artefacts)."
+        }
+      ]
+    },
+    {
+      "id": "HingeFeatureGenerator",
+      "file": "density/HingeFeatureGenerator.java",
+      "category": "core-math",
+      "summary": "Generates hinge features (x − knot)+/(max − knot) at every candidate knot.",
+      "description": "For every candidate threshold thr[i], the hinge feature is max(0, (x − thr[i])/(maxVal − thr[i])). Computes sample expectations and feature expectations in a single sorted-pass: maintains running sums Σ x·w and Σ w over the right tail, from which the conditional mean and variance of x − thr above each threshold follow in O(1) per threshold.",
+      "extends": "SortedFeatureGenerator",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "void setSampleExpectations(FeaturedSpace X)",
+          "description": "Walks the sorted index right-to-left accumulating Σ x/biasDiv and Σ (x/biasDiv)² over samples. At each threshold computes the hinge sample-mean = ((sum1 − thr·wsum1) / (maxVal − thr)) / m and standard deviation, builds an Interval (avg ± β·std/√m) and stores its midpoint and half-width as f.sampleExpectation and f.sampleDeviation."
+        },
+        {
+          "signature": "void updateFeatureExpectations(FeaturedSpace X)",
+          "description": "Walks sorted points right-to-left accumulating Σ x·density and Σ density; at each threshold the hinge feature expectation is (sum − thr·wsum) / densityNormalizer / (maxVal − thr)."
+        },
+        {
+          "signature": "Feature exportFeature(int thrIndex)",
+          "description": "Materialises a concrete HingeFeature(feature, thr[thrIndex], maxVal) when Sequential picks this threshold, copying sampleExpectation, sampleDeviation, expectation and beta from the generator."
+        }
+      ]
+    },
+    {
+      "id": "ThrFeatureGenerator",
+      "file": "density/ThrFeatureGenerator.java",
+      "category": "core-math",
+      "summary": "Generates threshold features 𝟙[x > knot] at every candidate knot.",
+      "description": "Maintains running sums and squared-sums of 1/biasDiv over the samples seen so far (sorted by feature value); converts these into mean and standard deviation of the threshold's indicator under the empirical distribution, then β-scaled confidence interval to set the sample expectation and deviation.",
+      "extends": "SortedFeatureGenerator",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "void setSampleExpectations(FeaturedSpace X)",
+          "description": "Sweep right-to-left over sortedVals; whenever a sample is encountered, accumulate val = 1/biasDiv(sample) into sum1 and sum1². At each threshold compute avg = sum1/m, std = √((sum2 − m·avg²)/(m−1)), capped to thrInfo.max/2, then sampleExpectation = mid of Interval(avg±β/√m·std)."
+        },
+        {
+          "signature": "void updateFeatureExpectations(FeaturedSpace X)",
+          "description": "Accumulates Σ density along the sorted order; the threshold feature expectation at thr[i] is the cumulative tail mass / densityNormalizer."
+        },
+        {
+          "signature": "Feature exportFeature(int thrIndex)",
+          "description": "Materialises a ThresholdFeature(feature, thr[thrIndex], name) and copies sampleExpectation/Deviation/expectation/beta from the generator."
+        }
+      ]
+    },
+    {
+      "id": "FeatureGenerator",
+      "file": "density/FeatureGenerator.java",
+      "category": "core-math",
+      "summary": "Interface for lazy feature families with a continuum of candidates.",
+      "description": "Abstract contract for feature generators that expose many candidate features without materialising them all. Provides per-index access, sample/feature expectation updates, and a way to export the chosen feature when the Sequential optimizer picks one.",
+      "extends": "Object",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "void setSampleExpectations(FeaturedSpace X)",
+          "description": "Compute and store each candidate's empirical mean and beta-scaled deviation under the current bias."
+        },
+        {
+          "signature": "void updateFeatureExpectations(FeaturedSpace X)",
+          "description": "Refresh each candidate's expectation under the current model density."
+        },
+        {
+          "signature": "Feature exportFeature(int index)",
+          "description": "Materialise a permanent Feature for the chosen candidate."
+        },
+        {
+          "signature": "Feature toFeature(int index)",
+          "description": "Lightweight on-demand view of a candidate (used by Sequential.deltaLossBound)."
+        }
+      ]
+    },
+    {
+      "id": "Feature",
+      "file": "density/Feature.java",
+      "category": "feature",
+      "summary": "Abstract base class for all Maxent features.",
+      "description": "Defines the type-tag enumeration (BINARY, LINEAR, SQUARE, PRODUCT, THR_GEN, THR, L_CONT, L_CAT, L_F_BIAS_OUT, L_DEBIAS_AVG, F_W_SAMPLES, HINGE_GEN, HINGE), bookkeeping fields (lambda, sampleExpectation, sampleDeviation, expectation, contribution, beta, active), and abstract eval(int) / eval(Sample) methods. Subclasses provide the specific functional form.",
+      "extends": "Object",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "abstract double eval(int p)",
+          "description": "Evaluate the feature at background point index p."
+        },
+        {
+          "signature": "abstract double eval(Sample s)",
+          "description": "Evaluate the feature at a presence sample."
+        },
+        {
+          "signature": "int type()",
+          "description": "Returns the integer feature-type tag by unwrapping caching/scaling/clamping wrappers and dispatching on the inner concrete class."
+        },
+        {
+          "signature": "double[] distinctVals()",
+          "description": "Returns the sorted array of distinct values the feature takes across the background — used by BinaryFeature.makeAll to expand categorical layers."
+        },
+        {
+          "signature": "boolean isMask()",
+          "description": "Tests whether the feature is constant across all background points (treated as a mask layer)."
+        }
+      ]
+    },
+    {
+      "id": "LinearFeature",
+      "file": "density/LinearFeature.java",
+      "category": "feature",
+      "summary": "Linear feature: f(x) = inner feature's value.",
+      "description": "Trivial pass-through wrapper used to make explicit the linear term over a base layer feature so that .lambdas files record the linear coefficient explicitly even when its value is 0 (needed for clamping at apply-time).",
+      "extends": "Feature",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "double eval(int p)",
+          "description": "Returns f.eval(p) where f is the wrapped continuous base feature."
+        },
+        {
+          "signature": "double eval(Sample s)",
+          "description": "Returns f.eval(s) at a sample."
+        }
+      ]
+    },
+    {
+      "id": "ScaledFeature",
+      "file": "density/ScaledFeature.java",
+      "category": "feature",
+      "summary": "Linearly rescales a feature to [0, 1] using (val − min) / (max − min).",
+      "description": "Stores the min/max range observed in the training set and exposes the linearly rescaled value. Maxent stores all features in a comparable [0,1] scale so that β regularisation parameters are comparable across feature types.",
+      "extends": "Feature",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "double eval(int p)",
+          "description": "Returns (f.eval(p) − min) / scale, where scale = max − min."
+        },
+        {
+          "signature": "double eval(Sample s)",
+          "description": "Returns (f.eval(s) − min) / scale."
+        }
+      ]
+    },
+    {
+      "id": "CachedFeature",
+      "file": "density/CachedFeature.java",
+      "category": "feature",
+      "summary": "Pre-computes and caches feature values over all background points.",
+      "description": "Materialises the n-vector of f.eval(0..n-1) once at construction, then serves O(1) lookups. Samples are still evaluated through the wrapped feature.",
+      "extends": "Feature",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "double eval(int p)",
+          "description": "Returns cached vals[p]."
+        }
+      ]
+    },
+    {
+      "id": "CachedScaledFeature",
+      "file": "density/CachedScaledFeature.java",
+      "category": "feature",
+      "summary": "ScaledFeature with cached values across the background.",
+      "description": "Combines ScaledFeature with CachedFeature so that the rescaled (val − min)/scale values are computed once and stored.",
+      "extends": "ScaledFeature",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "double eval(int p)",
+          "description": "Returns the cached rescaled value vals[p]."
+        }
+      ]
+    },
+    {
+      "id": "ClampedFeature",
+      "file": "density/ClampedFeature.java",
+      "category": "feature",
+      "summary": "Clamps a feature's value to [min, max] during projection.",
+      "description": "Used at apply-time so the model does not extrapolate when a projection layer's value at a new site lies outside the training range. Returns min/max if the value is out of range, otherwise the original value.",
+      "extends": "Feature",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "double eval(int p)",
+          "description": "Returns val clipped to [min, max]."
+        },
+        {
+          "signature": "double eval(Sample s)",
+          "description": "Same clip at a sample."
+        }
+      ]
+    },
+    {
+      "id": "ConstFeature",
+      "file": "density/ConstFeature.java",
+      "category": "feature",
+      "summary": "A feature that returns a constant c at every point.",
+      "description": "Used as the default bias (1.0) and as a placeholder for bias-as-prior when no bias is supplied.",
+      "extends": "Feature",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "double eval(int p)",
+          "description": "Returns the constant c."
+        }
+      ]
+    },
+    {
+      "id": "HingeFeature",
+      "file": "density/HingeFeature.java",
+      "category": "feature",
+      "summary": "Hinge: f(x) = max(0, (x − min)/(max − min)).",
+      "description": "A one-sided piecewise-linear feature: 0 below the knot, linearly increasing to 1 at max. Together with its reverse counterpart, hinges give Maxent the flexibility of GAM-style smooth responses without overfitting.",
+      "extends": "Feature",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "double eval(double d)",
+          "description": "Returns (d − min)/(max − min) if d > min, else 0."
+        },
+        {
+          "signature": "double eval(int i)",
+          "description": "Hinge of f.eval(i)."
+        },
+        {
+          "signature": "double eval(Sample s)",
+          "description": "Hinge of f.eval(s)."
+        }
+      ]
+    },
+    {
+      "id": "HingeGeneratorFeature",
+      "file": "density/HingeGeneratorFeature.java",
+      "category": "feature",
+      "summary": "Marker subclass that flags a feature as a hinge-knot generator source.",
+      "description": "Wraps a continuous base feature so makeFeatures can route it into a HingeFeatureGenerator instead of treating it as a linear feature. Eval methods pass through unchanged.",
+      "extends": "Feature",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "double eval(int p)",
+          "description": "Pass-through to underlying feature."
+        }
+      ]
+    },
+    {
+      "id": "ThresholdFeature",
+      "file": "density/ThresholdFeature.java",
+      "category": "feature",
+      "summary": "Threshold: f(x) = 𝟙[x > threshold].",
+      "description": "A binary step function at a given threshold knot. Used by Maxent's threshold-feature class to model abrupt changes in suitability.",
+      "extends": "Feature",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "double eval(int i)",
+          "description": "Returns 1.0 if f.eval(i) > threshold else 0.0."
+        },
+        {
+          "signature": "double eval(Sample s)",
+          "description": "Returns 1.0 if f.eval(s) > threshold else 0.0."
+        }
+      ]
+    },
+    {
+      "id": "ThrGeneratorFeature",
+      "file": "density/ThrGeneratorFeature.java",
+      "category": "feature",
+      "summary": "Marker subclass identifying a base feature as a threshold-knot generator source.",
+      "description": "Lets makeFeatures route this feature into a ThrFeatureGenerator. Eval methods pass through to the underlying continuous feature.",
+      "extends": "Feature",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "double eval(int p)",
+          "description": "Pass-through to wrapped feature."
+        }
+      ]
+    },
+    {
+      "id": "ProductFeature",
+      "file": "density/ProductFeature.java",
+      "category": "feature",
+      "summary": "Product feature: f(x) = f1(x) · f2(x).",
+      "description": "Captures pairwise interactions between two continuous (rescaled) base features.",
+      "extends": "Feature",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "double eval(int p)",
+          "description": "Returns f1.eval(p) * f2.eval(p)."
+        },
+        {
+          "signature": "double eval(Sample s)",
+          "description": "Returns f1.eval(s) * f2.eval(s)."
+        }
+      ]
+    },
+    {
+      "id": "SquareFeature",
+      "file": "density/SquareFeature.java",
+      "category": "feature",
+      "summary": "Quadratic feature: f(x) = inner(x)².",
+      "description": "Squared transform of a base feature. Together with the linear feature, lets Maxent fit unimodal responses.",
+      "extends": "Feature",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "double eval(int p)",
+          "description": "Returns f.eval(p)²."
+        },
+        {
+          "signature": "double eval(Sample s)",
+          "description": "Returns f.eval(s)²."
+        }
+      ]
+    },
+    {
+      "id": "PolyhedralFeature",
+      "file": "density/PolyhedralFeature.java",
+      "category": "feature",
+      "summary": "Polyhedral feature: f(x) = (x − x²)/4.",
+      "description": "Hidden experimental feature class; symmetric tent that peaks at x = 0.5. Used only when params.polyhedral is enabled.",
+      "extends": "SquareFeature",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "double eval(int p)",
+          "description": "Returns (val − val²)/4."
+        }
+      ]
+    },
+    {
+      "id": "BinaryFeature",
+      "file": "density/BinaryFeature.java",
+      "category": "feature",
+      "summary": "Binary indicator feature for categorical layers: f(x) = 𝟙[x == target].",
+      "description": "One-hot expansion of a categorical layer. makeAll() enumerates all distinct values in the base feature and creates a BinaryFeature for each, marking the first as isFirstCategory.",
+      "extends": "Feature",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "double eval(int i)",
+          "description": "Returns 1.0 if f.eval(i) == target else 0.0."
+        },
+        {
+          "signature": "static BinaryFeature[] makeAll(Feature f, String s)",
+          "description": "Returns one BinaryFeature per distinct value of f, expanding a categorical predictor into its one-hot indicator set."
+        }
+      ]
+    },
+    {
+      "id": "FeatureWithSamples",
+      "file": "density/FeatureWithSamples.java",
+      "category": "feature",
+      "summary": "Feature whose background and sample values are stored as float arrays.",
+      "description": "Used when background data and sample data are read out of SWD CSV files rather than from grids. Stores parallel backgroundVals[] and sampleVals[] indexed by point.",
+      "extends": "Feature",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "double eval(int p)",
+          "description": "Returns backgroundVals[p]."
+        },
+        {
+          "signature": "double eval(Sample s)",
+          "description": "Returns sampleVals[s.getPoint()]."
+        }
+      ]
+    },
+    {
+      "id": "FeatureWithSamplesAsPoints",
+      "file": "density/FeatureWithSamplesAsPoints.java",
+      "category": "feature",
+      "summary": "Concatenates samples into the end of a feature's background point list.",
+      "description": "Used when addSamplesToBackground is true: the n-th background point is the original feature value for p<f.n, or the sample at index p − f.n otherwise.",
+      "extends": "Feature",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "double eval(int p)",
+          "description": "Returns f.eval(p) if p<f.n else f.eval(ss[p − f.n])."
+        }
+      ]
+    },
+    {
+      "id": "LayerFeature",
+      "file": "density/LayerFeature.java",
+      "category": "feature",
+      "summary": "Abstract feature backed by an environmental Layer, tagged with its Layer type.",
+      "description": "Distinguishes continuous, categorical, mask, F_BIAS_OUT, DEBIAS_AVG, etc layers, so Feature.type() can dispatch correctly. Subclassed by Extractor and GridSetFromFile.",
+      "extends": "Feature",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "int getLayerType()",
+          "description": "Returns Layer.CONT / CAT / F_BIAS_OUT / DEBIAS_AVG / MASK / PROB / CUM."
+        }
+      ]
+    },
+    {
+      "id": "Grid",
+      "file": "density/Grid.java",
+      "category": "io",
+      "summary": "Abstract 2D raster of environmental values with type-tagged storage.",
+      "description": "Defines the abstract eval(r,c) and hasData(r,c), plus run-length-encoded compressed-row factory vals2Grid for short/byte/int/float/double rasters with optional ubyte support. Provides histograms, bilinear interpolation, min/max, sum, masked traversal.",
+      "extends": "Object",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "abstract float eval(int r, int c)",
+          "description": "Returns the (possibly type-cast) value of the grid at row r, column c."
+        },
+        {
+          "signature": "abstract boolean hasData(int r, int c)",
+          "description": "Returns true iff (r,c) is in bounds and not equal to the NODATA value."
+        },
+        {
+          "signature": "float[] minmax()",
+          "description": "Single-pass scan over data cells returning [min, max]."
+        },
+        {
+          "signature": "double[] histogram(double min, double max, int n)",
+          "description": "Returns a normalised count histogram of the grid's values, binned into n equal-width bins between min and max."
+        },
+        {
+          "signature": "double interpolate(double lon, double lat, float target, boolean match)",
+          "description": "Bilinear interpolation at geographic (lon,lat). If match=true, treats each pixel value as 0/1 indicator of equality to target, returning a fractional match strength."
+        },
+        {
+          "signature": "static Grid vals2Grid(GridDimension dim, float[][] vals, String name, double NODATA, boolean compress)",
+          "description": "Factory: wraps a 2D float array into a Grid, optionally using run-length encoding row-by-row when compressionRatio<0.9 (Grid.compressedGrid)."
+        },
+        {
+          "signature": "static GridUbyte gridByte2gridUbyte(GridByte g)",
+          "description": "Reinterprets signed bytes as unsigned (adds 256 to negatives) for grids that exceed signed-byte range."
+        }
+      ]
+    },
+    {
+      "id": "GridByte",
+      "file": "density/GridByte.java",
+      "category": "io",
+      "summary": "Grid backed by signed byte cells.",
+      "description": "Concrete grid for predictor layers with small integer range; eval returns the byte cast to float.",
+      "extends": "Grid",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "byte evalByte(int r, int c)",
+          "description": "Byte-level accessor."
+        }
+      ]
+    },
+    {
+      "id": "GridShort",
+      "file": "density/GridShort.java",
+      "category": "io",
+      "summary": "Grid backed by 16-bit short cells.",
+      "description": "Concrete grid for medium-range integer layers.",
+      "extends": "Grid",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "short evalShort(int r, int c)",
+          "description": "Short accessor."
+        }
+      ]
+    },
+    {
+      "id": "GridInt",
+      "file": "density/GridInt.java",
+      "category": "io",
+      "summary": "Grid backed by 32-bit int cells.",
+      "description": "Concrete grid for full-range integer layers.",
+      "extends": "Grid",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "int evalInt(int r, int c)",
+          "description": "Int accessor."
+        }
+      ]
+    },
+    {
+      "id": "GridDouble",
+      "file": "density/GridDouble.java",
+      "category": "io",
+      "summary": "Grid backed by 64-bit double cells.",
+      "description": "Concrete grid for high-precision floating-point layers.",
+      "extends": "Grid",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "double evalDouble(int r, int c)",
+          "description": "Double accessor."
+        }
+      ]
+    },
+    {
+      "id": "GridUbyte",
+      "file": "density/GridUbyte.java",
+      "category": "io",
+      "summary": "Grid backed by unsigned-byte (0..255) cells stored as shorts.",
+      "description": "Concrete grid for unsigned 8-bit layers.",
+      "extends": "Grid",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "short evalUbyte(int r, int c)",
+          "description": "Unsigned-byte accessor returning 0..255."
+        }
+      ]
+    },
+    {
+      "id": "GridDimension",
+      "file": "density/GridDimension.java",
+      "category": "io",
+      "summary": "Geographic dimension descriptor (xllcorner, yllcorner, cellsize, nrows, ncols).",
+      "description": "Immutable header describing a raster's geometry. Translates between (row,col) pixel coords and (x,y) geographic coords, with toRow/toCol/toX/toY/inBounds helpers.",
+      "extends": "Object",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "int toRow(double y)",
+          "description": "Geographic latitude → row index."
+        },
+        {
+          "signature": "int toCol(double x)",
+          "description": "Geographic longitude → column index."
+        },
+        {
+          "signature": "double toX(int c)",
+          "description": "Column index → cell-centre longitude."
+        },
+        {
+          "signature": "double toY(int r)",
+          "description": "Row index → cell-centre latitude."
+        },
+        {
+          "signature": "boolean equals(Object o)",
+          "description": "Header equality used to verify that all environmental layers share the same geometry."
+        }
+      ]
+    },
+    {
+      "id": "GridIO",
+      "file": "density/GridIO.java",
+      "category": "io",
+      "summary": "Reads .asc, .mxe, .grd/.gri and .bil rasters into Grid objects.",
+      "description": "Dispatches on file extension: ASCII Esri grid (.asc), Maxent compressed binary (.mxe), Diva-GIS / generic (.grd + .gri) and BIL (.bil + .hdr). Detects native datatype (byte/short/int/float/double/ubyte), optionally shrinks oversized grids via stride sampling, and run-length-compresses rows.",
+      "extends": "Object",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "static Grid readGrid(String fileName)",
+          "description": "Picks readASC/readMXE/readGRD based on suffix and returns a typed, optionally compressed Grid."
+        },
+        {
+          "signature": "static Grid readASC(String fileName)",
+          "description": "Parses an ESRI ASCII grid header (ncols, nrows, xll, yll, cellsize, NODATA_value) then streams the value matrix, auto-detecting short vs float; downcasts to byte if min/max fits."
+        },
+        {
+          "signature": "static Grid readMXE(String fileName)",
+          "description": "Reads the gzipped binary Maxent format: dimension, NODATA_value, nativeType, then a typed matrix."
+        },
+        {
+          "signature": "static Grid readGRD(String fileName)",
+          "description": "Parses the .grd INI-style header (or .hdr for BIL) and streams the little-endian .gri/.bil binary into a Grid."
+        }
+      ]
+    },
+    {
+      "id": "GridWriter",
+      "file": "density/GridWriter.java",
+      "category": "io",
+      "summary": "Writes Grid objects out as .asc / .mxe / .grd-.gri / .bil / .csv.",
+      "description": "Streaming writer: chooses the right binary or text format based on the output suffix, tracks min/max during writing for the .grd header, handles UBYTE→short widening on .grd output (Diva 5.2 bug workaround), and supports batched multi-grid writes for replicate summaries.",
+      "extends": "Object",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "void writeAll()",
+          "description": "Walks the grid row by row writing every cell to the chosen format."
+        },
+        {
+          "signature": "static void writeGrids(Grid[] grids, String[] filenames, boolean notscientific)",
+          "description": "Writes several aligned grids in lock-step (used by AvgStderr for avg/std/min/max/median/lowerci summaries)."
+        }
+      ]
+    },
+    {
+      "id": "GridZoom",
+      "file": "density/GridZoom.java",
+      "category": "io",
+      "summary": "Pan/zoomable Swing canvas for browsing a Grid with a heatmap color ramp.",
+      "description": "Subclass of Zoom that maps grid values via a red-yellow-green-blue scale based on per-grid min/max.",
+      "extends": "Zoom",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "void setGrid(Grid g)",
+          "description": "Switches the displayed raster and recomputes the colour scale."
+        },
+        {
+          "signature": "int showColor(int r, int c)",
+          "description": "Returns the pixel RGB for grid cell (r,c) by linear interpolation in HSV-ish ramp."
+        }
+      ]
+    },
+    {
+      "id": "ShrunkGrid",
+      "file": "density/ShrunkGrid.java",
+      "category": "io",
+      "summary": "Wraps a LazyGrid and exposes a downsampled view by keeping every k-th cell.",
+      "description": "Used when GridIO.maxRowsAndCols caps the raster: subsamples on read to bound memory.",
+      "extends": "LazyGrid",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "float eval(int r, int c)",
+          "description": "Returns grid.eval(r·k, c·k)."
+        }
+      ]
+    },
+    {
+      "id": "LazyGrid",
+      "file": "density/LazyGrid.java",
+      "category": "io",
+      "summary": "Streams Grid contents row-at-a-time without materialising the full matrix.",
+      "description": "Memory-friendly grid that opens the underlying file lazily and advances forward when eval(r,c) is called. Throws if asked for a row earlier than the current cursor. Used heavily by Extractor and Project so they can hold many predictor layers in memory simultaneously.",
+      "extends": "Grid",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "void initialize()",
+          "description": "Opens the file (.asc / .mxe / .grd / .bil) and reads the header."
+        },
+        {
+          "signature": "float eval(int r, int c)",
+          "description": "Advances row-by-row until row r, then returns currentRow[c]."
+        }
+      ]
+    },
+    {
+      "id": "GridSet",
+      "file": "density/GridSet.java",
+      "category": "io",
+      "summary": "Holds a collection of aligned grids and exposes them as Features.",
+      "description": "Parent class for Extractor and GridSetFromFile. Stores the layers, the shared GridDimension, train and test SampleSet2s, and a name→Feature map.",
+      "extends": "Object",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "Feature[] toFeatures()",
+          "description": "Returns one LayerFeature per environmental layer, lazily built."
+        },
+        {
+          "signature": "Feature getFeature(String name)",
+          "description": "Looks up a feature by layer name, fatal-error if absent."
+        }
+      ]
+    },
+    {
+      "id": "GridSetDummy",
+      "file": "density/GridSetDummy.java",
+      "category": "io",
+      "summary": "Stub GridSet that creates features on-demand from sample featureMaps.",
+      "description": "Used when applying a trained model to samples that already carry per-feature values in their HashMap (no background grids needed). Each feature evaluation simply pulls from sample.featureMap.",
+      "extends": "GridSet",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "Feature getFeature(String s)",
+          "description": "Returns (or lazily creates) a Feature whose eval(Sample) reads s.featureMap.get(name)."
+        }
+      ]
+    },
+    {
+      "id": "GridSetFromFile",
+      "file": "density/GridSetFromFile.java",
+      "category": "io",
+      "summary": "Reads a SWD-format CSV (one row per background point with all env values) as a GridSet.",
+      "description": "Used as an alternative to per-layer raster directories. Each row is a background point with x,y plus one column per environmental variable; the resulting 'grid' is a 1×N strip, and feature.eval(p) reads allvals[p][i].",
+      "extends": "GridSet",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "GridSetFromFile(String filename, Layer[] layers)",
+          "description": "Parses the SWD CSV, verifies all requested layers are present, and stores allvals[p][i]."
+        },
+        {
+          "signature": "Grid getGrid(String name)",
+          "description": "Returns a 1-row virtual Grid backed by the column for `name`."
+        }
+      ]
+    },
+    {
+      "id": "Layer",
+      "file": "density/Layer.java",
+      "category": "io",
+      "summary": "Tags an environmental variable with its name and semantic type.",
+      "description": "Constant integers for Continuous/Categorical/F_BIAS_OUT/Mask/Probability/Cumulative/DebiasAvg drive how the layer is converted to features by Runner.makeFeatures.",
+      "extends": "Object",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "int getType()",
+          "description": "Returns the type constant."
+        },
+        {
+          "signature": "String getName()",
+          "description": "Returns the layer name."
+        }
+      ]
+    },
+    {
+      "id": "Extractor",
+      "file": "density/Extractor.java",
+      "category": "io",
+      "summary": "Reads grids + samples and extracts background and sample feature values.",
+      "description": "The primary GridSet implementation. Opens each environmental layer as a LazyGrid, scans the rasters once to (a) record sample env-values at each sample's pixel, (b) reservoir-sample up to maxBackground background points where all layers have data. Caches each ASCII layer into a .mxe file for faster re-reads.",
+      "extends": "GridSet",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "void extractSamples(String[] files, int nRandom, String trainsamples, String testsamples, Layer[] layers, String[] species)",
+          "description": "Top-level extraction: opens grids, parses train/test SampleSet2s, calls readSamples to pull background and sample values into Rc records."
+        },
+        {
+          "signature": "int readSamples(int n)",
+          "description": "Single pass over rows of the rasters: at each sample's (r,c) writes env values into the sample's data array; at every other cell reservoir-samples into randextract[] until n background points are collected."
+        },
+        {
+          "signature": "static String CachedGridFilename(String filename, boolean makeit)",
+          "description": "Converts a .asc file to a .mxe cache under maxent.cache/ if not already present; returns the cached path. Skips caching for already-binary formats."
+        },
+        {
+          "signature": "void extractSample(Rc rc)",
+          "description": "Fills a single sample's env vector by either reading from the LazyGrid or trusting columns already present in the SWD CSV; warns and removes the sample if it has missing data."
+        }
+      ]
+    },
+    {
+      "id": "Sample",
+      "file": "density/Sample.java",
+      "category": "model",
+      "summary": "Occurrence record: species name, geographic lon/lat, and pre-extracted env values.",
+      "description": "Immutable record carrying the point's row/col in the raster system, lat/lon, species name and an optional HashMap from feature name to Double (used when env values are read from SWD CSV).",
+      "extends": "Object",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "int getRow(GridDimension dim)",
+          "description": "Computes the row index in dim of this sample's latitude."
+        },
+        {
+          "signature": "int getCol(GridDimension dim)",
+          "description": "Computes the column index in dim of this sample's longitude."
+        }
+      ]
+    },
+    {
+      "id": "SampleSet",
+      "file": "density/SampleSet.java",
+      "category": "model",
+      "summary": "Container of presence Samples organised by species.",
+      "description": "Maps species names to ArrayLists of Samples; offers replication (cross-validation split, bootstrap, subsample), spatial filtering by minimum inter-point distance, duplicate removal at grid-cell or coordinate resolution, and writeback to CSV.",
+      "extends": "Object",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "Sample[] getSamples(String s)",
+          "description": "Returns all presence points for species s."
+        },
+        {
+          "signature": "void removeDuplicates(GridDimension dim)",
+          "description": "Drops samples that share the same grid cell (or same lat/lon when dim is null)."
+        },
+        {
+          "signature": "SampleSet splitForCV(int n)",
+          "description": "Partitions each species' samples randomly into n folds, mutating this set into the training folds and returning a SampleSet of held-out test folds keyed by species_0…species_n-1."
+        },
+        {
+          "signature": "void replicate(int n, boolean bootstrap)",
+          "description": "Creates n bootstrap (with replacement) or copy replicates per species. Used for replicate=>1 runs that are not cross-validation."
+        },
+        {
+          "signature": "SampleSet randomSample(int percentTestPointsPerSpecies)",
+          "description": "Randomly moves a fraction of each species' samples into a returned test SampleSet (destructive split on this set)."
+        },
+        {
+          "signature": "SampleSet spatialFilter(double mindist)",
+          "description": "Greedy random-order spatial thinning: keeps points at least `mindist` apart."
+        }
+      ]
+    },
+    {
+      "id": "SampleSet2",
+      "file": "density/SampleSet2.java",
+      "category": "model",
+      "summary": "SampleSet implementation that reads samples from a CSV (optionally SWD format).",
+      "description": "Parses a samples.csv file: species, x, y, plus optional env-value columns. Aligns columns to a given Layer[] so it knows which env-vars are present in the CSV vs which still need grid lookup. Handles the longFirst/latFirst column-order heuristic.",
+      "extends": "SampleSet",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "void read(String[] species)",
+          "description": "Parses every row, skipping species not in the selection set. For each sample, builds the data[] vector, populates speciesMap, and falls back to NODATA_value when an env column is missing."
+        },
+        {
+          "signature": "static String[] featureNames(String sampleFile)",
+          "description": "Returns the env-var column names by reading the header of the sample CSV."
+        },
+        {
+          "signature": "void createMaps()",
+          "description": "Walks samples and builds each one's featureMap from the data[] vector — needed before training."
+        }
+      ]
+    },
+    {
+      "id": "Params",
+      "file": "density/Params.java",
+      "category": "utility",
+      "summary": "Typesafe accessors for every Maxent parameter, auto-generated from parameters.csv.",
+      "description": "Exposes get/set methods for each parameter declared in parameters.csv (responsecurves, jackknife, betamultiplier, hingethreshold, replicates, replicatetype, biasfile, etc). Subclass of ParamsPre.",
+      "extends": "ParamsPre",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "String[] getParameters()",
+          "description": "Returns the full list of parameter names."
+        },
+        {
+          "signature": "double getBetamultiplier()",
+          "description": "Global multiplier for automatic regularisation parameters."
+        },
+        {
+          "signature": "int getReplicates()",
+          "description": "Number of replicate runs (for cross-validation / bootstrap / subsample)."
+        },
+        {
+          "signature": "String getReplicatetype()",
+          "description": "Replication strategy: crossvalidate, bootstrap or subsample."
+        },
+        {
+          "signature": "String getOutputformat()",
+          "description": "Output transform: cloglog, logistic, cumulative or raw."
+        }
+      ]
+    },
+    {
+      "id": "ParamsPre",
+      "file": "density/ParamsPre.java",
+      "category": "utility",
+      "summary": "Parses parameters from CSV and from command-line arguments.",
+      "description": "Loads parameters.csv into a Parameters table, handles the togglelayertype/togglespeciesselected/togglelayerselected toggles, the bias type aliases (factorbiasout/priordistribution/debiasaverages), and writes the generated Params.java source.",
+      "extends": "Parameters",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "String readFromArgs(String[] args)",
+          "description": "Parses argv applying toggles, sets bias type from factorbiasout/priordistribution/debiasaverages."
+        },
+        {
+          "signature": "void setSelections()",
+          "description": "After toggles have been collected, resolves the final list of selected species, selected layers and layer types."
+        },
+        {
+          "signature": "boolean parseParam(String param)",
+          "description": "Parses a single key=value or key directive, including the toggleLayerType / toggleSpeciesSelected variants."
+        }
+      ]
+    },
+    {
+      "id": "Parameter",
+      "file": "density/Parameter.java",
+      "category": "utility",
+      "summary": "Single parameter descriptor: name, type, default value, allowed range, tooltip and UI level.",
+      "description": "Records the metadata for one row of parameters.csv. Supports types BOOLEAN, INTEGER, DOUBLE, FILE, DIRECTORY, FILEDIRECTORY, STRING (with optional selection list), and UI exposure levels (BASIC, ADVANCED, EXPERIMENTAL, CORE, HIDDEN).",
+      "extends": "Object",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "void setValue(String s)",
+          "description": "Parses the string into the right type with range checks and selection-list validation."
+        },
+        {
+          "signature": "boolean isAllowedValue(String s)",
+          "description": "For selection parameters, returns whether s is in the allowed-values list."
+        }
+      ]
+    },
+    {
+      "id": "Parameters",
+      "file": "density/Parameters.java",
+      "category": "utility",
+      "summary": "Registry of Parameter objects, supporting flag/abbreviation lookup and argv parsing.",
+      "description": "Holds the ordered list of all parameters, plus maps from flag letters and from selection-value strings to their owning Parameter, so the command-line parser can resolve them.",
+      "extends": "Object",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "String readFromArgs(String[] args)",
+          "description": "Walks argv: short flags like -h, -P become boolean toggles; flag=value sets values; bare selection strings dispatch to the right parameter."
+        },
+        {
+          "signature": "Parameter getParameter(String p)",
+          "description": "Lookup by name."
+        },
+        {
+          "signature": "boolean parseParam(String p)",
+          "description": "Parses a single key/value token."
+        }
+      ]
+    },
+    {
+      "id": "Project",
+      "file": "density/Project.java",
+      "category": "core-math",
+      "summary": "Applies a trained .lambdas model to new environmental layers.",
+      "description": "Re-instantiates the trained feature set from a .lambdas file (linear, product, quadratic, polyhedral, binary, threshold, hinge, reverse-hinge with their min/max ranges), opens each predictor as a LazyGrid (with ClampedGrid wrappers for the linear bases), and produces an output Grid whose eval(r,c) computes Σⱼ λⱼ · fⱼ(values) − lPN, exponentiates, normalises by densityNormalizer, then applies logistic/cloglog/cumulative transforms.",
+      "extends": "Object",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "void doProject(String lambdaFile, String gridDir, String outFile, String clampedFileName)",
+          "description": "Top-level projection: reads the .lambdas file, opens each input grid (with caching), builds the output Grid, and streams it to disk plus an optional clamp-difference grid."
+        },
+        {
+          "signature": "Grid[] projectGrid(String lambdaFile, String gridDir)",
+          "description": "Returns the prediction grid and the clamping grid (|predClamped − predNoClamp|). For each output pixel, sums λⱼ · fⱼ(env) where fⱼ are reconstructed Pfeature wrappers."
+        },
+        {
+          "signature": "static double interpolateCumulative(double[] raw, double[] cumulative, double t)",
+          "description": "Maps a raw output t to its cumulative percentile using piecewise-linear interpolation of the raw→cumulative index produced during training."
+        },
+        {
+          "signature": "double logistic(double raw, double entropy, double dp)",
+          "description": "Logistic transform of the raw model output: dp·v / ((1−dp) + dp·v) where v = raw·exp(entropy)."
+        },
+        {
+          "signature": "static double cloglog(double raw, double entropy)",
+          "description": "Cloglog transform 1 − exp(−raw·exp(entropy)), Maxent's default output format."
+        },
+        {
+          "signature": "static double[][] readCumulativeIndex(String filename)",
+          "description": "Reads the _omission.csv file emitted at training time and returns the [rawValues, cumulativePercentiles] arrays used by interpolateCumulative."
+        }
+      ]
+    },
+    {
+      "id": "Evaluate",
+      "file": "density/Evaluate.java",
+      "category": "core-math",
+      "summary": "Programmatic API for scoring a single point with a trained model.",
+      "description": "Convenience wrapper around Project: load a .lambdas file once, then call setValue for each variable and evaluate() to get the output at that virtual point. Used by PermutationImportance.",
+      "extends": "Object",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "Evaluate(String lambdafile)",
+          "description": "Loads the model via Project.projectGrid; the returned Grid is a 1×1 raster whose eval(0,0) reads from the variable map."
+        },
+        {
+          "signature": "void setValue(String variable, double value)",
+          "description": "Stores a value for the named environmental variable in the shared variable map."
+        },
+        {
+          "signature": "double evaluate()",
+          "description": "Triggers projectGrid.eval(0,0) which sums λⱼ · fⱼ(varmap)."
+        }
+      ]
+    },
+    {
+      "id": "PermutationImportance",
+      "file": "density/PermutationImportance.java",
+      "category": "core-math",
+      "summary": "Estimates variable importance by permuting one column at a time and measuring AUC drop.",
+      "description": "Implements the Breiman 2001 / Strobl 2009 permutation-importance procedure: at each predictor, randomly permutes the column across presence+background, re-scores via Evaluate, and reports the (positive) AUC drop, normalised so they sum to 100.",
+      "extends": "Object",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "double[] go(Feature[] features, Sample[] samples, String lambdafile)",
+          "description": "Builds presence/background value matrices, computes original AUC, then for each variable permutes its column and recomputes AUC; returns the per-variable AUC-drop percentages."
+        },
+        {
+          "signature": "double auc(double[][] a, int index, int[] permutation)",
+          "description": "Scores all rows of a (presence then background), optionally substituting a permuted column at index, and returns the AUC of presence vs background scores using Stats.auc."
+        }
+      ]
+    },
+    {
+      "id": "AUC",
+      "file": "density/AUC.java",
+      "category": "core-math",
+      "summary": "CLI to compute AUC of a prediction raster against test presences using a random background sample.",
+      "description": "Reads test points and a single prediction grid, draws 10000 random background points via Extractor, and reports Stats.auc(presence, background).",
+      "extends": "Object",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "void go(String[] args)",
+          "description": "Reads predfile + testpoints, builds presence and background score arrays, prints AUC."
+        }
+      ]
+    },
+    {
+      "id": "AvgStderr",
+      "file": "density/AvgStderr.java",
+      "category": "core-math",
+      "summary": "Averages a stack of replicate prediction grids and writes avg/stddev/min/max/median/lowerCI rasters.",
+      "description": "Used after replicate runs (cross-validation, bootstrap, subsample). Loads each replicate's grid (or projects each .lambdas file via Project) and writes the per-pixel statistics as GridWriter outputs.",
+      "extends": "Object",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "void process(String outdir, String species, int n, String gridDir, String outPrefix, String suffix)",
+          "description": "Loads n replicate models, projects each onto gridDir, and writes the summary stats grids."
+        },
+        {
+          "signature": "static double stddev(double[] x)",
+          "description": "√Var(x)."
+        },
+        {
+          "signature": "static double median(double[] x)",
+          "description": "Sorts and returns the middle element."
+        }
+      ]
+    },
+    {
+      "id": "Threshold",
+      "file": "density/Threshold.java",
+      "category": "core-math",
+      "summary": "Applies a threshold value to a prediction raster, producing a binary GridByte.",
+      "description": "Pixels >= threshold become 1, others 0. Returns the predicted-presence fraction.",
+      "extends": "Object",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "double applyThreshold(String infile, double threshold, String outfile)",
+          "description": "Writes the thresholded grid and returns predicted-presence fraction."
+        }
+      ]
+    },
+    {
+      "id": "ResponsePlot",
+      "file": "density/ResponsePlot.java",
+      "category": "core-math",
+      "summary": "Renders per-variable response curves with Ptolemy MyPlot.",
+      "description": "Used by Runner.createProfiles to write a PNG showing how the model output changes as a single variable sweeps its range (with all others held at their sample mean).",
+      "extends": "MyPlot",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "void makeplot(double[] x, double[] y, double[] stddev, boolean iscategorical, String var, String title, String ylabel, String outfile, double mmin, double mmax, Params params, boolean exponent, boolean writePlotData)",
+          "description": "Plots y vs x, optionally with error bars and a thumbnail, and writes the .png plus an optional plot-data CSV."
+        }
+      ]
+    },
+    {
+      "id": "MaxEnt",
+      "file": "density/MaxEnt.java",
+      "category": "core-math",
+      "summary": "Top-level main() — chooses GUI or headless run.",
+      "description": "Parses argv into a Params object, optionally pops up the Swing GUI, otherwise invokes Runner.start()/end() in batch mode. Also checks the Java runtime version (≥1.5).",
+      "extends": "Object",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "static void main(String[] args)",
+          "description": "Initialises Params from argv. If visible=true, creates the GUI; otherwise calls Runner directly."
+        }
+      ]
+    },
+    {
+      "id": "Convert",
+      "file": "density/Convert.java",
+      "category": "utility",
+      "summary": "Bulk grid format converter and type-detector.",
+      "description": "Walks a directory, detects each grid's actual numeric range, and writes it back in the smallest viable type (byte/ubyte/short/int/float). Also dumps a directory of grids to a single CSV.",
+      "extends": "Object",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "static Grid readEfficient(String inFile)",
+          "description": "Reads the grid once via LazyGrid, scans for actual min/max and whether all values are integer, then returns the narrowest typed Grid that can hold them."
+        },
+        {
+          "signature": "static void toCsv(File[] grids, String outdir, String prefix)",
+          "description": "Writes a row,col,layer1,layer2,… CSV for all grid cells that have data in every layer."
+        }
+      ]
+    },
+    {
+      "id": "NceasApply",
+      "file": "density/NceasApply.java",
+      "category": "core-math",
+      "summary": "Applies trained lambdas to NCEAS-format SWD samples and writes per-species score CSVs.",
+      "description": "Loads each .lambdas file, recreates the model via FeaturedSpace(.lambdas), then for each sample computes the raw score and writes it (or its logistic/cloglog/cumulative transform).",
+      "extends": "Object",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "static Sample[] readSamples(String sampleFile)",
+          "description": "Parses the NCEAS SWD CSV into Sample objects whose featureMap holds each predictor value."
+        }
+      ]
+    },
+    {
+      "id": "DoubleIndexSort",
+      "file": "density/DoubleIndexSort.java",
+      "category": "utility",
+      "summary": "Sorts indices into a double[] without boxing into Integer[].",
+      "description": "Jon Bentley / Doug McIlroy quicksort, ported from the Harpoon project, adapted to sort an int[] of indices by the values of an external double[]. Used by SortedFeatureGenerator and Sequential.featuresToUpdate.",
+      "extends": "Object",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "static int[] sort(double[] vals)",
+          "description": "Returns indices 0..n-1 sorted so vals[indices[i]] is increasing. Throws on NaN or −0.0."
+        }
+      ]
+    },
+    {
+      "id": "FloatIndexSort",
+      "file": "density/FloatIndexSort.java",
+      "category": "utility",
+      "summary": "Float[] version of DoubleIndexSort.",
+      "description": "Same Bentley-McIlroy quicksort but on float[] keys.",
+      "extends": "Object",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "static int[] sort(float[] vals)",
+          "description": "Returns increasing-key permutation of indices."
+        }
+      ]
+    },
+    {
+      "id": "DoubleIterator",
+      "file": "density/DoubleIterator.java",
+      "category": "utility",
+      "summary": "Abstract on-the-fly iterator over n doubles.",
+      "description": "Used by FeaturedSpace.getAUC to iterate over background densities without materialising the full array.",
+      "extends": "Object",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "abstract double getNext()",
+          "description": "Returns the next double in the sequence."
+        },
+        {
+          "signature": "double[] getvals(double div)",
+          "description": "Materialises into a normalised double[] for sorting."
+        }
+      ]
+    },
+    {
+      "id": "RunLengthEncoding",
+      "file": "density/RunLengthEncoding.java",
+      "category": "utility",
+      "summary": "Per-row run-length compression for grid storage.",
+      "description": "Encodes runs of repeated values as (count, value) pairs (count 0..127 = repeats, negative = literal run) for short/int/byte/float row arrays, used by Grid.compressedGrid to reduce memory for predictor layers with large no-data regions.",
+      "extends": "Object",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "void compress(float[] from, byte[] counts, float[] vals)",
+          "description": "Encodes from[] into counts[]/vals[] using ±count framing; sets compressionRatio."
+        },
+        {
+          "signature": "void decompress(byte[] counts, float[] vals, float[] into)",
+          "description": "Inverse of compress."
+        }
+      ]
+    },
+    {
+      "id": "Csv",
+      "file": "density/Csv.java",
+      "category": "utility",
+      "summary": "Tolerant CSV reader with field-by-name access and an Applier callback.",
+      "description": "Detects semicolon separators (French Excel), unquotes quoted fields, lets callers iterate rows via an Applier pattern, build column-indexed maps, and pull whole columns as String[] or double[].",
+      "extends": "Object",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "String[] getRecord()",
+          "description": "Returns the next row's tokens, skipping rows that don't have headers.length fields with a warning."
+        },
+        {
+          "signature": "void apply(Applier applier)",
+          "description": "Iterates over every row, invoking applier.process() — the standard idiom in Runner and others."
+        },
+        {
+          "signature": "static double[] getDoubleCol(String filename, String field)",
+          "description": "Convenience method to read one numeric column."
+        }
+      ]
+    },
+    {
+      "id": "CsvWriter",
+      "file": "density/CsvWriter.java",
+      "category": "utility",
+      "summary": "Column-named CSV writer that supports appending and dynamic schemas.",
+      "description": "Used by Runner to build maxentResults.csv: callers print into columns by name; columns can be added on-the-fly between rows. Handles re-opening for append and quotes fields that contain commas.",
+      "extends": "Object",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "void print(String column, double f)",
+          "description": "Writes a value into the named column of the current row."
+        },
+        {
+          "signature": "void println()",
+          "description": "Emits the current row, writing the header if this is the first row."
+        }
+      ]
+    },
+    {
+      "id": "Utils",
+      "file": "density/Utils.java",
+      "category": "utility",
+      "summary": "Project-wide static helpers: logging, progress, fatal error handling, random seed, file utilities.",
+      "description": "Holds the global Random generator, the optional MyProgressMonitor, the log PrintStream, the warning-suppression dictionary, and helpers for resolving environmental-layer paths, capitalising strings, writing PrintWriters, and converting between file paths and layer names.",
+      "extends": "Object",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "static void applyStaticParams(Params params)",
+          "description": "Copies a small set of top-level params into static fields (verbose, warnings, visible, NODATA_value, scientificPattern, …)."
+        },
+        {
+          "signature": "static void reportProgress(double x)",
+          "description": "Updates the progress monitor with x/100 progress and the current progressMsg."
+        },
+        {
+          "signature": "static void fatalException(String s, Throwable e)",
+          "description": "Logs, pops up an error dialog if visible, and exits."
+        },
+        {
+          "signature": "static boolean testMemory(long bytesToTest)",
+          "description": "Workaround for incorrect JVM maxMemory() reports: tries to allocate the target bytes in 1 MB chunks and returns whether it succeeded."
+        },
+        {
+          "signature": "static String[] gridFileNames(String dir, HashSet<String> keep)",
+          "description": "Enumerates grid files in a directory, filtered to the requested layer-name set, sorted."
+        }
+      ]
+    },
+    {
+      "id": "MyScanner",
+      "file": "density/MyScanner.java",
+      "category": "utility",
+      "summary": "Hand-rolled fast whitespace-delimited token scanner for ASCII grid bodies.",
+      "description": "A char-buffered scanner used by GridIO.readASC to avoid the overhead of java.util.Scanner. Supports nextFloat with locale-tolerant comma/dot decimal swap.",
+      "extends": "Object",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "String next()",
+          "description": "Returns the next whitespace-delimited token."
+        },
+        {
+          "signature": "float nextFloat()",
+          "description": "Parses the next token as a float, trying comma→dot if NumberFormatException is thrown."
+        }
+      ]
+    },
+    {
+      "id": "ParallelRun",
+      "file": "density/ParallelRun.java",
+      "category": "utility",
+      "summary": "Fixed-thread-pool task runner used by Runner.jackknifeGain.",
+      "description": "Wraps a java.util.concurrent ExecutorService, lets callers add Runnable tasks, runs them all in parallel and propagates exceptions back as fatal errors.",
+      "extends": "Object",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "void add(Runnable task, String name)",
+          "description": "Queues a task."
+        },
+        {
+          "signature": "void runall(String runtype, boolean verbose)",
+          "description": "Invokes all queued tasks via invokeAll() and rethrows any execution exception."
+        }
+      ]
+    },
+    {
+      "id": "SwingWorker",
+      "file": "density/SwingWorker.java",
+      "category": "utility",
+      "summary": "Classic 3rd-generation SwingWorker for off-EDT compute with on-EDT completion.",
+      "description": "Used by GUI.doRun so that Runner.start() runs on a worker thread while the Swing event thread stays responsive.",
+      "extends": "Object",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "abstract Object construct()",
+          "description": "Runs on the worker thread."
+        },
+        {
+          "signature": "void finished()",
+          "description": "Invoked on the EDT once construct() returns."
+        },
+        {
+          "signature": "void start()",
+          "description": "Spawns the worker thread."
+        }
+      ]
+    },
+    {
+      "id": "TerminalException",
+      "file": "density/TerminalException.java",
+      "category": "utility",
+      "summary": "Runtime exception that carries a user-facing message and underlying cause.",
+      "description": "Legacy wrapper formerly used to abort Maxent runs with a pop-up message.",
+      "extends": "RuntimeException",
+      "implements": [],
+      "methods": []
+    },
+    {
+      "id": "GUI",
+      "file": "density/GUI.java",
+      "category": "gui",
+      "summary": "Main Maxent Swing front-end: samples/layers selection, parameter editor, Run button.",
+      "description": "Lays out the FileSelect for samples, the DirectorySelect for layers, the per-feature-type checkboxes, the Settings dialog (autogenerated from Parameters at all UI levels), the Help window, and the Run button which spawns a SwingWorker to invoke Runner.",
+      "extends": "Object",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "Container createContentPane()",
+          "description": "Builds the root pane with samples + layers selectors and the central controls panel."
+        },
+        {
+          "signature": "JPanel createParamsPanes()",
+          "description": "Generates a tabbed Parameters dialog (Basic / Advanced / Experimental / Core) by iterating over Params.allParams()."
+        },
+        {
+          "signature": "boolean paramsFromInterface()",
+          "description": "Reads every editor widget back into the Params object before invoking Runner."
+        },
+        {
+          "signature": "void doRun(boolean terminate)",
+          "description": "Creates the MyProgressMonitor and spawns a SwingWorker that runs Runner.start()."
+        },
+        {
+          "signature": "void applyParams()",
+          "description": "Reverse of paramsFromInterface — pushes Params values back into the widgets."
+        }
+      ]
+    },
+    {
+      "id": "MyProgressMonitor",
+      "file": "density/MyProgressMonitor.java",
+      "category": "gui",
+      "summary": "Modeless progress dialog with a Cancel button and a status label.",
+      "description": "Wraps a JOptionPane containing a JProgressBar; clicking Cancel fires an ActionListener that calls Runner.stop().",
+      "extends": "JDialog",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "void setProgress(int current)",
+          "description": "Updates the JProgressBar value."
+        },
+        {
+          "signature": "void setNote(String note)",
+          "description": "Updates the status label."
+        },
+        {
+          "signature": "void addActionListener(ActionListener l)",
+          "description": "Registers the Cancel-button handler."
+        }
+      ]
+    },
+    {
+      "id": "FileEntry",
+      "file": "density/FileEntry.java",
+      "category": "gui",
+      "summary": "Single-line file/directory entry widget with Browse button.",
+      "description": "Label + JTextField + Browse button assembly with a JFileChooser and an optional ActionListener fired when the user picks a file.",
+      "extends": "JPanel",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "String getText()",
+          "description": "Returns the trimmed entry text."
+        },
+        {
+          "signature": "void setText(String s)",
+          "description": "Sets the entry text and fires the listener."
+        }
+      ]
+    },
+    {
+      "id": "FileSelect",
+      "file": "density/FileSelect.java",
+      "category": "gui",
+      "summary": "Sample-file picker: shows species checkboxes parsed from the CSV's first column.",
+      "description": "Subclass of DirectorySelect that, when a samples CSV is chosen, lists each distinct species name with a checkbox so the user can select which to model.",
+      "extends": "DirectorySelect",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "String[] getFiles(File f)",
+          "description": "Reads the species names from the samples CSV."
+        }
+      ]
+    },
+    {
+      "id": "DirectorySelect",
+      "file": "density/DirectorySelect.java",
+      "category": "gui",
+      "summary": "Directory picker that lists checkboxes per environmental layer, with continuous/categorical combos.",
+      "description": "Builds a scrollable layer list with select-all/deselect-all buttons. Used in the GUI for both the layers directory and the samples file.",
+      "extends": "JPanel",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "String[] getSelected(boolean sel)",
+          "description": "Returns names of all checked (or unchecked) layers."
+        },
+        {
+          "signature": "String[] getTypes()",
+          "description": "Returns the layer type (Continuous/Categorical) chosen per selected layer."
+        }
+      ]
+    },
+    {
+      "id": "Display",
+      "file": "density/Display.java",
+      "category": "gui",
+      "summary": "Canvas that renders a Grid as a colored heatmap with samples overlaid.",
+      "description": "Supports LOG/PLAIN/CLASS color modes, black-and-white, dichromatic, red-and-yellow palettes, sample dots, a legend with auto-positioning, and PNG export. Used by Show and Runner for prediction pictures.",
+      "extends": "Canvas",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "void makeImage()",
+          "description": "Walks all pixels, mapping grid value → color via showColor, drawing samples and the legend."
+        },
+        {
+          "signature": "void writeImage(String outFile)",
+          "description": "Writes the current buffered image to a PNG."
+        }
+      ]
+    },
+    {
+      "id": "Show",
+      "file": "density/Show.java",
+      "category": "gui",
+      "summary": "Standalone viewer for grids with zoom, sample overlay and color modes.",
+      "description": "JFrame application built on Display, used to inspect .asc/.mxe rasters from the command line or from Maxent's html report links.",
+      "extends": "Object",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "void buildShow()",
+          "description": "Constructs the viewer JFrame, the file entry widgets, and the navigation buttons."
+        }
+      ]
+    },
+    {
+      "id": "View",
+      "file": "density/View.java",
+      "category": "gui",
+      "summary": "Lightweight predictor + prediction viewer with per-button switching.",
+      "description": "Loads a prediction grid plus a directory of predictor grids and lets the user switch the display between them with toolbar buttons.",
+      "extends": "JFrame",
+      "implements": [
+        "ActionListener"
+      ],
+      "methods": [
+        {
+          "signature": "void actionPerformed(ActionEvent e)",
+          "description": "Handles toolbar clicks to switch the displayed grid."
+        }
+      ]
+    },
+    {
+      "id": "Zoom",
+      "file": "density/Zoom.java",
+      "category": "gui",
+      "summary": "Generic pannable / zoomable image canvas.",
+      "description": "Maintains zoomLevel, center, and an offscreen BufferedImage; handles mouse-drag to sweep a zoom rectangle and click to recenter.",
+      "extends": "JPanel",
+      "implements": [
+        "MouseMotionListener",
+        "MouseListener"
+      ],
+      "methods": [
+        {
+          "signature": "void adjustZoom(double r)",
+          "description": "Scales the current zoom by r."
+        },
+        {
+          "signature": "void makeImage()",
+          "description": "Re-renders the image based on current pan/zoom."
+        }
+      ]
+    },
+    {
+      "id": "Explain",
+      "file": "density/Explain.java",
+      "category": "gui",
+      "summary": "Interactive tool to dissect a Maxent prediction at a clicked point.",
+      "description": "Loads a .lambdas model and shows a map alongside per-variable response curves. Clicking the map shows each variable's contribution to the logit (cloglog) at that point as a bar chart.",
+      "extends": "JFrame",
+      "implements": [
+        "ActionListener"
+      ],
+      "methods": [
+        {
+          "signature": "double contribution(int i, double v)",
+          "description": "Returns the change in logit when variable i is moved from its sample mean to value v, minus the prorated constant term."
+        },
+        {
+          "signature": "void showClicked(int r, int c)",
+          "description": "Updates response-curve markers and the per-variable contribution-to-logit bar plot for the clicked pixel."
+        }
+      ]
+    },
+    {
+      "id": "Explainold",
+      "file": "density/Explainold.java",
+      "category": "gui",
+      "summary": "Earlier version of Explain that reads precomputed response-curve .dat files.",
+      "description": "Predecessor to Explain that reads response curve data from disk instead of recomputing on the fly. Still shipped for backward compatibility.",
+      "extends": "JFrame",
+      "implements": [
+        "ActionListener"
+      ],
+      "methods": []
+    },
+    {
+      "id": "DoubleNumberField",
+      "file": "density/DoubleNumberField.java",
+      "category": "gui",
+      "summary": "JFormattedTextField for editing doubles with up to 9 fractional digits.",
+      "description": "Used in the GUI Settings dialog for double-typed parameters.",
+      "extends": "JFormattedTextField",
+      "implements": [],
+      "methods": []
+    },
+    {
+      "id": "WholeNumberField",
+      "file": "density/WholeNumberField.java",
+      "category": "gui",
+      "summary": "JFormattedTextField for editing bounded integers.",
+      "description": "Used in the GUI Settings dialog for integer parameters with a min/max range.",
+      "extends": "JFormattedTextField",
+      "implements": [],
+      "methods": []
+    },
+    {
+      "id": "GetIniValueParser",
+      "file": "density/GetIniValueParser.java",
+      "category": "utility",
+      "summary": "Windows-style INI file reader/writer used to parse .grd headers.",
+      "description": "Section + key=value parser ported from Steve DeGroof's public-domain code, made case-insensitive and exception-throwing. Used by GridIO.GRDHeader.",
+      "extends": "Object",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "String getValue(String subject, String variable)",
+          "description": "Returns the value associated with [subject].variable, case-insensitive."
+        },
+        {
+          "signature": "boolean setValue(String subject, String variable, String value)",
+          "description": "Sets a value, creating the section if needed."
+        }
+      ]
+    },
+    {
+      "id": "FileSelectPlaceholder",
+      "file": "density/Getval.java",
+      "category": "core-math",
+      "summary": "CLI: extract environmental values at sample points.",
+      "description": "Reads a samples file plus a list of grid files, instantiates an Extractor with maxBackground=0 (no random background), and prints each sample's values across all layers to stdout in CSV.",
+      "extends": "Object",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "static void main(String[] args)",
+          "description": "Builds Extractor, prints headers, then for each sample prints lon,lat plus per-layer values (or the NODATA marker)."
+        }
+      ]
+    },
+    {
+      "id": "Addconstant",
+      "file": "density/tools/Addconstant.java",
+      "category": "utility",
+      "summary": "CLI: add a constant offset to each non-NODATA cell of one or more grids.",
+      "description": "Loops over input grids, builds a wrapping Grid whose eval = orig + offset, and writes to outdir.",
+      "extends": "Object",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "void add(double offset, String infile, String outdir)",
+          "description": "Writes a Grid containing g.eval(r,c)+offset."
+        }
+      ]
+    },
+    {
+      "id": "Checkerboard",
+      "file": "density/tools/Checkerboard.java",
+      "category": "utility",
+      "summary": "CLI: splits a samples file into train/test using a checkerboard tiling of the study area.",
+      "description": "Tiles the bounding box into blocksPerRow × blocksPerCol blocks and routes each sample into the train or test CSV based on the block parity (with edge-exclusion to reduce spatial leakage).",
+      "extends": "Object",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "boolean isTrain(double x, double y, GridDimension dim)",
+          "description": "Returns whether (x,y) lands in a train block."
+        },
+        {
+          "signature": "boolean isExcludedEdge(double x, double y, GridDimension dim)",
+          "description": "True near a block boundary (excluded for both splits)."
+        }
+      ]
+    },
+    {
+      "id": "Coarsen",
+      "file": "density/tools/Coarsen.java",
+      "category": "utility",
+      "summary": "CLI: downsamples grids by summing (2r+1)×(2r+1) windows.",
+      "description": "Used to reduce raster resolution while keeping the total mass approximately preserved per coarse cell.",
+      "extends": "Object",
+      "implements": [],
+      "methods": []
+    },
+    {
+      "id": "Correlation",
+      "file": "density/tools/Correlation.java",
+      "category": "utility",
+      "summary": "CLI: prints the Pearson correlation between two grids over pixels where both have data.",
+      "description": "Reads both grids fully then calls density.tools.Stats.correlation.",
+      "extends": "Object",
+      "implements": [],
+      "methods": []
+    },
+    {
+      "id": "Count",
+      "file": "density/tools/Count.java",
+      "category": "utility",
+      "summary": "CLI: counts data cells, sums values, and optionally tabulates value-frequency for grids.",
+      "description": "Useful for sanity-checking grid headers and value distributions.",
+      "extends": "Object",
+      "implements": [],
+      "methods": []
+    },
+    {
+      "id": "Csv2Grid",
+      "file": "density/tools/Csv2Grid.java",
+      "category": "utility",
+      "summary": "CLI: rasterises a CSV column into a grid using a template grid's geometry.",
+      "description": "Streams rows of the CSV in order, indexing by either row/col or x/y, and writes the chosen column value into the matching pixel.",
+      "extends": "Object",
+      "implements": [],
+      "methods": []
+    },
+    {
+      "id": "CsvOnePass",
+      "file": "density/tools/CsvOnePass.java",
+      "category": "utility",
+      "summary": "Single-pass CSV reader (no rewind), used by tools that stream through huge CSVs.",
+      "description": "Simpler/faster than Csv when random column access isn't needed.",
+      "extends": "Object",
+      "implements": [],
+      "methods": []
+    },
+    {
+      "id": "CsvToGrid",
+      "file": "density/tools/CsvToGrid.java",
+      "category": "utility",
+      "summary": "CLI: rasterises (x,y) pairs from a CSV into a 0/1 presence grid using a template grid's dimension.",
+      "description": "Marks every grid cell that contains at least one CSV point.",
+      "extends": "Object",
+      "implements": [],
+      "methods": []
+    },
+    {
+      "id": "DeBiasedFeature",
+      "file": "density/tools/DeBiasedFeature.java",
+      "category": "feature",
+      "summary": "Experimental: feature that interpolates between f(p) and the sample mean by a bias factor.",
+      "description": "eval(p) = sampleMean + bias(p) · (f(p) − sampleMean). Used to factor sampling bias out of a predictor.",
+      "extends": "Feature",
+      "implements": [],
+      "methods": []
+    },
+    {
+      "id": "Dimensions",
+      "file": "density/tools/Dimensions.java",
+      "category": "utility",
+      "summary": "CLI: prints each grid's header (ncols, nrows, xll, yll, cellsize).",
+      "description": "Trivial helper for diagnosing grid alignment issues.",
+      "extends": "Object",
+      "implements": [],
+      "methods": []
+    },
+    {
+      "id": "Eval",
+      "file": "density/tools/Eval.java",
+      "category": "core-math",
+      "summary": "Batch evaluation for the NCEAS benchmark: AUC, correlation, square error, kappa, log-loss per species.",
+      "description": "Reads prediction CSVs and ground-truth presence/absence tables and reports a multi-metric table.",
+      "extends": "Object",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "static double computeAUC(HashMap map)",
+          "description": "Pulls presence/absence scores out of map and calls density.tools.Stats.auc."
+        },
+        {
+          "signature": "static double computeLogloss(HashMap map, int which)",
+          "description": "Negative log-likelihood on presence (which=0), absence (which=1) or combined (which=2)."
+        }
+      ]
+    },
+    {
+      "id": "FilterSamples",
+      "file": "density/tools/FilterSamples.java",
+      "category": "utility",
+      "summary": "CLI: spatially-filters a samples CSV so no two points are within a minimum distance.",
+      "description": "Wraps SampleSet.spatialFilter and writes the result to a new CSV.",
+      "extends": "Object",
+      "implements": [],
+      "methods": []
+    },
+    {
+      "id": "FromBRTFormat",
+      "file": "density/tools/FromBRTFormat.java",
+      "category": "utility",
+      "summary": "CLI: imports BRT-format prediction files back into Maxent's grid format.",
+      "description": "Pairs a one-prediction-per-data-cell text file with an index .mxe grid and reconstitutes a Grid.",
+      "extends": "Object",
+      "implements": [],
+      "methods": []
+    },
+    {
+      "id": "GetvalAll",
+      "file": "density/tools/GetvalAll.java",
+      "category": "utility",
+      "summary": "CLI: dumps every data cell in a grid directory as tab-separated x,y,val₁,val₂,…",
+      "description": "Used to produce SWD-format background tables.",
+      "extends": "Object",
+      "implements": [],
+      "methods": []
+    },
+    {
+      "id": "Histogram",
+      "file": "density/tools/Histogram.java",
+      "category": "utility",
+      "summary": "CLI: builds aligned per-layer histograms across the region, an optional prediction grid, and a samples file.",
+      "description": "Outputs a CSV with bin-centre and fractional frequencies for region, prediction, and occurrences.",
+      "extends": "Object",
+      "implements": [],
+      "methods": []
+    },
+    {
+      "id": "Interpolate",
+      "file": "density/tools/Interpolate.java",
+      "category": "utility",
+      "summary": "CLI: linearly interpolates between two prediction grids over time.",
+      "description": "Useful for producing annual slices between two decadal climate projections.",
+      "extends": "Object",
+      "implements": [],
+      "methods": []
+    },
+    {
+      "id": "JackAUC",
+      "file": "density/tools/JackAUC.java",
+      "category": "core-math",
+      "summary": "Computes leave-one-out AUC-like stats from jackknife replicate predictions.",
+      "description": "For each held-out point in turn, reads the corresponding species_jN.mxe grid and measures the rank of the held-out point's score relative to all data cells.",
+      "extends": "Object",
+      "implements": [],
+      "methods": []
+    },
+    {
+      "id": "Jiggle",
+      "file": "density/tools/Jiggle.java",
+      "category": "utility",
+      "summary": "Adds small uniform noise to a SWD CSV (with optional bias-grid weighting).",
+      "description": "Used for sensitivity / replicate experiments.",
+      "extends": "Object",
+      "implements": [],
+      "methods": []
+    },
+    {
+      "id": "LimitingFactor",
+      "file": "density/tools/LimitingFactor.java",
+      "category": "core-math",
+      "summary": "CLI: produces a grid showing which environmental variable most reduces the prediction at each pixel.",
+      "description": "Substitutes each variable in turn with its sample-mean and records which substitution causes the biggest improvement (i.e., which is currently most limiting).",
+      "extends": "Object",
+      "implements": [],
+      "methods": []
+    },
+    {
+      "id": "Mask",
+      "file": "density/tools/Mask.java",
+      "category": "utility",
+      "summary": "CLI: masks one grid by another's data-extent.",
+      "description": "Returns a Grid whose hasData is the AND of both.",
+      "extends": "Object",
+      "implements": [],
+      "methods": []
+    },
+    {
+      "id": "Mid",
+      "file": "density/tools/Mid.java",
+      "category": "utility",
+      "summary": "Builds a synthetic 0–1 'probability of presence' surface that fades at the extremes of each predictor.",
+      "description": "Used to construct test datasets with known structure.",
+      "extends": "Object",
+      "implements": [],
+      "methods": []
+    },
+    {
+      "id": "NceasMonge",
+      "file": "density/tools/NceasMonge.java",
+      "category": "utility",
+      "summary": "Adds NCEAS dataset/siteid columns to existing prediction outputs.",
+      "description": "Bookkeeping helper for the NCEAS species-distribution-modelling benchmark.",
+      "extends": "Object",
+      "implements": [],
+      "methods": []
+    },
+    {
+      "id": "Node",
+      "file": "density/tools/Node.java",
+      "category": "utility",
+      "summary": "Priority-queue node with row, col, heap index and weight.",
+      "description": "Used by NodePriorityQueue inside RestrictToOccupied.",
+      "extends": "Object",
+      "implements": [],
+      "methods": []
+    },
+    {
+      "id": "NodePriorityQueue",
+      "file": "density/tools/NodePriorityQueue.java",
+      "category": "utility",
+      "summary": "Min-heap priority queue keyed by Node.qweight, supporting decrease-key.",
+      "description": "Used by RestrictToOccupied for Dijkstra-style distance computation.",
+      "extends": "Object",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "void insert(Node nd)",
+          "description": "Pushes nd and bubbles up."
+        },
+        {
+          "signature": "void reducedWeight(Node nd)",
+          "description": "Re-heapifies after nd's qweight has been reduced."
+        },
+        {
+          "signature": "Node deleteMin()",
+          "description": "Removes and returns the lowest-weight node."
+        }
+      ]
+    },
+    {
+      "id": "Novel",
+      "file": "density/tools/Novel.java",
+      "category": "core-math",
+      "summary": "MESS analysis: highlights regions where projection variables are outside training-data ranges.",
+      "description": "Builds per-variable histograms over the training region, then for each projection pixel computes the most novel variable and produces a coloured MoD raster + a continuous MESS raster.",
+      "extends": "Object",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "void go(Feature[] basefeatures, String projdir, String outfile)",
+          "description": "Builds histograms from training features and runs the comparison."
+        }
+      ]
+    },
+    {
+      "id": "Plus",
+      "file": "density/tools/Plus.java",
+      "category": "utility",
+      "summary": "CLI: sums or averages multiple grids cell-by-cell.",
+      "description": "Outputs the mean by default.",
+      "extends": "Object",
+      "implements": [],
+      "methods": []
+    },
+    {
+      "id": "PMedian",
+      "file": "density/tools/PMedian.java",
+      "category": "utility",
+      "summary": "Computes p-median distance, range overlap, midpoint shift and range reduction between presence and pseudo-presence environment sets.",
+      "description": "Used in the NCEAS data-quality study to quantify shift between training-only and full sample distributions.",
+      "extends": "Object",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "static double pmedianDistance(double[][] a, double[][] b, int measuretype)",
+          "description": "For each row in a, finds the nearest row in b under the chosen norm (L1, L2, max, geom, err) and returns the median distance."
+        }
+      ]
+    },
+    {
+      "id": "PMedianRand",
+      "file": "density/tools/PMedianRand.java",
+      "category": "utility",
+      "summary": "Variant of PMedian comparing random background to species data.",
+      "description": "Baseline distance measure used to calibrate PMedian.",
+      "extends": "Object",
+      "implements": [],
+      "methods": []
+    },
+    {
+      "id": "RandomSample",
+      "file": "density/tools/RandomSample.java",
+      "category": "utility",
+      "summary": "CLI: draws nSamples random background points from a stack of grids and prints them as SWD.",
+      "description": "Uses Extractor under the hood.",
+      "extends": "Object",
+      "implements": [],
+      "methods": []
+    },
+    {
+      "id": "RandomSample2",
+      "file": "density/RandomSample2.java",
+      "category": "utility",
+      "summary": "Draws presence samples from a probability surface, weighted by a bias grid.",
+      "description": "Used to simulate biased sampling for synthetic data experiments.",
+      "extends": "Object",
+      "implements": [],
+      "methods": []
+    },
+    {
+      "id": "RandomSample3",
+      "file": "density/tools/RandomSample3.java",
+      "category": "utility",
+      "summary": "Uniform random background sampler that requires data in all grids.",
+      "description": "Simpler, slower variant of RandomSample for small grid stacks.",
+      "extends": "Object",
+      "implements": [],
+      "methods": []
+    },
+    {
+      "id": "Reduce",
+      "file": "density/tools/Reduce.java",
+      "category": "utility",
+      "summary": "Downsamples a grid by keeping the closest-to-centre data point in each k×k window.",
+      "description": "Used to bring a high-resolution grid down to a target pixel count.",
+      "extends": "Object",
+      "implements": [],
+      "methods": []
+    },
+    {
+      "id": "Reproject",
+      "file": "density/tools/Reproject.java",
+      "category": "utility",
+      "summary": "Reprojects a grid by sampling at the centre of each cell of a target dimension.",
+      "description": "Nearest-neighbour reproject; useful for aligning grids to a template extent.",
+      "extends": "Object",
+      "implements": [],
+      "methods": []
+    },
+    {
+      "id": "RestrictToOccupied",
+      "file": "density/tools/RestrictToOccupied.java",
+      "category": "core-math",
+      "summary": "Fades a prediction grid out by distance to the nearest occupied (above-threshold) cell connected to a sample.",
+      "description": "Uses a BFS to find the connected component above threshold containing samples, then a Dijkstra over distance to that region, and finally multiplies the prediction by a linearly-decaying weight from mindist to maxdist. Optional convex-hull post-processing.",
+      "extends": "Object",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "boolean[][] connected(Grid grid, Sample[] samples, double threshold, int dist)",
+          "description": "BFS from sample pixels through neighbours with grid.eval ≥ threshold."
+        },
+        {
+          "signature": "double[][] distanceToConn(boolean[][] connected, double maxdist, Grid grid)",
+          "description": "Dijkstra computing each pixel's geographic distance to the connected component, capped at maxdist."
+        },
+        {
+          "signature": "boolean[][] computeHull(boolean[][] conn)",
+          "description": "Computes the convex hull of the occupied region via Graham scan and fills it in."
+        }
+      ]
+    },
+    {
+      "id": "Scatter",
+      "file": "density/tools/Scatter.java",
+      "category": "utility",
+      "summary": "Prints 10000 random (val₁, val₂, …) samples from a stack of grids for scatterplotting.",
+      "description": "Diagnostic helper.",
+      "extends": "Object",
+      "implements": [],
+      "methods": []
+    },
+    {
+      "id": "Stats",
+      "file": "density/tools/Stats.java",
+      "category": "utility",
+      "summary": "Numeric helpers: AUC, Cohen's kappa, mean/variance/stddev, correlation, maxCorrelation.",
+      "description": "Hosts the AUC implementation used everywhere (auc() also returns the max-kappa threshold as a side effect) and a stochastic monotonic-rescaling routine that maximises Pearson correlation.",
+      "extends": "Object",
+      "implements": [],
+      "methods": [
+        {
+          "signature": "public static double auc(double[] presence, double[] absence)",
+          "description": "Sorts both arrays and counts ranks, computing AUC as (Σ over pairs of presence-rank-above-absence) / (|presence|·|absence|), and the max-Kappa threshold along the way."
+        },
+        {
+          "signature": "static double correlation(double[] x, double[] y)",
+          "description": "Pearson correlation between two vectors."
+        },
+        {
+          "signature": "static double maxCorrelation(double[] x, double[] y)",
+          "description": "Greedy isotonic regression that finds a monotonic transform of x maximising correlation with y."
+        }
+      ]
+    },
+    {
+      "id": "SubSample",
+      "file": "density/tools/SubSample.java",
+      "category": "utility",
+      "summary": "Strided downsampling of a directory of grids (keep every k-th pixel).",
+      "description": "Preserves the original numeric type unlike Reduce.",
+      "extends": "Object",
+      "implements": [],
+      "methods": []
+    },
+    {
+      "id": "Sum",
+      "file": "density/tools/Sum.java",
+      "category": "utility",
+      "summary": "Prints the sum of all data cells in each input grid.",
+      "description": "Sanity-check tool.",
+      "extends": "Object",
+      "implements": [],
+      "methods": []
+    },
+    {
+      "id": "ToolsThreshold",
+      "file": "density/tools/Threshold.java",
+      "category": "utility",
+      "summary": "Tools version of Threshold: writes a 0/1 grid given a cutoff.",
+      "description": "Convenience wrapper similar to density.Threshold but with no NODATA shenanigans.",
+      "extends": "Object",
+      "implements": [],
+      "methods": []
+    },
+    {
+      "id": "ToBoolean",
+      "file": "density/tools/ToBoolean.java",
+      "category": "utility",
+      "summary": "Writes a 0/1 grid: 1 wherever the input has data, 0 elsewhere (as NODATA).",
+      "description": "Used to derive a mask from any grid's data extent.",
+      "extends": "Object",
+      "implements": [],
+      "methods": []
+    },
+    {
+      "id": "ToBRTFormat",
+      "file": "density/tools/ToBRTFormat.java",
+      "category": "utility",
+      "summary": "Exports presence + background data into the BRT R-package's CSV format and an index .mxe grid.",
+      "description": "Bridges Maxent's SWD pipeline with Elith et al.'s BRT package.",
+      "extends": "Object",
+      "implements": [],
+      "methods": []
+    },
+    {
+      "id": "Union",
+      "file": "density/tools/Union.java",
+      "category": "utility",
+      "summary": "Writes a 0/1 grid that is 1 where any input grid has data.",
+      "description": "Set-union of data extents.",
+      "extends": "Object",
+      "implements": [],
+      "methods": []
+    },
+    {
+      "id": "ToolsUtils",
+      "file": "density/tools/Utils.java",
+      "category": "utility",
+      "summary": "NCEAS evaluation helpers: reading multi-region eval-file CSVs into presenceMap/absenceMap.",
+      "description": "Used by Eval and PMedian.",
+      "extends": "Object",
+      "implements": [],
+      "methods": []
+    },
+    {
+      "id": "LittleEndianInputStream",
+      "file": "com/macfaq/io/LittleEndianInputStream.java",
+      "category": "io",
+      "summary": "Little-endian DataInputStream replacement (Roedy Green, public domain).",
+      "description": "Used by LazyGrid and GridIO for reading .gri and .bil binary rasters which are little-endian.",
+      "extends": "FilterInputStream",
+      "implements": [
+        "DataInput"
+      ],
+      "methods": [],
+      "stub": true
+    },
+    {
+      "id": "LittleEndianOutputStream",
+      "file": "com/macfaq/io/LittleEndianOutputStream.java",
+      "category": "io",
+      "summary": "Little-endian DataOutputStream counterpart.",
+      "description": "Used by GridWriter for .gri output.",
+      "extends": "FilterOutputStream",
+      "implements": [
+        "DataOutput"
+      ],
+      "methods": [],
+      "stub": true
+    },
+    {
+      "id": "Getopt",
+      "file": "gnu/getopt/Getopt.java",
+      "category": "utility",
+      "summary": "GNU getopt port for argv parsing.",
+      "description": "Used pervasively by Maxent's CLI tools to parse short flags.",
+      "extends": "Object",
+      "implements": [],
+      "methods": [],
+      "stub": true
+    }
+  ],
+  "edges": [
+    {
+      "source": "LinearFeature",
+      "target": "Feature",
+      "type": "extends"
+    },
+    {
+      "source": "ScaledFeature",
+      "target": "Feature",
+      "type": "extends"
+    },
+    {
+      "source": "CachedFeature",
+      "target": "Feature",
+      "type": "extends"
+    },
+    {
+      "source": "CachedScaledFeature",
+      "target": "ScaledFeature",
+      "type": "extends"
+    },
+    {
+      "source": "ClampedFeature",
+      "target": "Feature",
+      "type": "extends"
+    },
+    {
+      "source": "ConstFeature",
+      "target": "Feature",
+      "type": "extends"
+    },
+    {
+      "source": "HingeFeature",
+      "target": "Feature",
+      "type": "extends"
+    },
+    {
+      "source": "HingeGeneratorFeature",
+      "target": "Feature",
+      "type": "extends"
+    },
+    {
+      "source": "ThresholdFeature",
+      "target": "Feature",
+      "type": "extends"
+    },
+    {
+      "source": "ThrGeneratorFeature",
+      "target": "Feature",
+      "type": "extends"
+    },
+    {
+      "source": "ProductFeature",
+      "target": "Feature",
+      "type": "extends"
+    },
+    {
+      "source": "SquareFeature",
+      "target": "Feature",
+      "type": "extends"
+    },
+    {
+      "source": "PolyhedralFeature",
+      "target": "SquareFeature",
+      "type": "extends"
+    },
+    {
+      "source": "BinaryFeature",
+      "target": "Feature",
+      "type": "extends"
+    },
+    {
+      "source": "FeatureWithSamples",
+      "target": "Feature",
+      "type": "extends"
+    },
+    {
+      "source": "FeatureWithSamplesAsPoints",
+      "target": "Feature",
+      "type": "extends"
+    },
+    {
+      "source": "LayerFeature",
+      "target": "Feature",
+      "type": "extends"
+    },
+    {
+      "source": "DeBiasedFeature",
+      "target": "Feature",
+      "type": "extends"
+    },
+    {
+      "source": "GridByte",
+      "target": "Grid",
+      "type": "extends"
+    },
+    {
+      "source": "GridShort",
+      "target": "Grid",
+      "type": "extends"
+    },
+    {
+      "source": "GridInt",
+      "target": "Grid",
+      "type": "extends"
+    },
+    {
+      "source": "GridDouble",
+      "target": "Grid",
+      "type": "extends"
+    },
+    {
+      "source": "GridUbyte",
+      "target": "Grid",
+      "type": "extends"
+    },
+    {
+      "source": "LazyGrid",
+      "target": "Grid",
+      "type": "extends"
+    },
+    {
+      "source": "ShrunkGrid",
+      "target": "LazyGrid",
+      "type": "extends"
+    },
+    {
+      "source": "GridZoom",
+      "target": "Zoom",
+      "type": "extends"
+    },
+    {
+      "source": "GridSetDummy",
+      "target": "GridSet",
+      "type": "extends"
+    },
+    {
+      "source": "GridSetFromFile",
+      "target": "GridSet",
+      "type": "extends"
+    },
+    {
+      "source": "Extractor",
+      "target": "GridSet",
+      "type": "extends"
+    },
+    {
+      "source": "SampleSet2",
+      "target": "SampleSet",
+      "type": "extends"
+    },
+    {
+      "source": "SortedFeatureGenerator",
+      "target": "FeatureGenerator",
+      "type": "implements"
+    },
+    {
+      "source": "HingeFeatureGenerator",
+      "target": "SortedFeatureGenerator",
+      "type": "extends"
+    },
+    {
+      "source": "ThrFeatureGenerator",
+      "target": "SortedFeatureGenerator",
+      "type": "extends"
+    },
+    {
+      "source": "Params",
+      "target": "ParamsPre",
+      "type": "extends"
+    },
+    {
+      "source": "ParamsPre",
+      "target": "Parameters",
+      "type": "extends"
+    },
+    {
+      "source": "FileSelect",
+      "target": "DirectorySelect",
+      "type": "extends"
+    },
+    {
+      "source": "TerminalException",
+      "target": "Object",
+      "type": "extends"
+    },
+    {
+      "source": "MaxEnt",
+      "target": "Params",
+      "type": "uses"
+    },
+    {
+      "source": "MaxEnt",
+      "target": "Runner",
+      "type": "calls"
+    },
+    {
+      "source": "MaxEnt",
+      "target": "GUI",
+      "type": "calls"
+    },
+    {
+      "source": "MaxEnt",
+      "target": "Utils",
+      "type": "uses"
+    },
+    {
+      "source": "GUI",
+      "target": "Runner",
+      "type": "calls"
+    },
+    {
+      "source": "GUI",
+      "target": "Params",
+      "type": "uses"
+    },
+    {
+      "source": "GUI",
+      "target": "SwingWorker",
+      "type": "uses"
+    },
+    {
+      "source": "GUI",
+      "target": "MyProgressMonitor",
+      "type": "uses"
+    },
+    {
+      "source": "GUI",
+      "target": "FileSelect",
+      "type": "uses"
+    },
+    {
+      "source": "GUI",
+      "target": "DirectorySelect",
+      "type": "uses"
+    },
+    {
+      "source": "GUI",
+      "target": "FileEntry",
+      "type": "uses"
+    },
+    {
+      "source": "GUI",
+      "target": "WholeNumberField",
+      "type": "uses"
+    },
+    {
+      "source": "GUI",
+      "target": "DoubleNumberField",
+      "type": "uses"
+    },
+    {
+      "source": "GUI",
+      "target": "Parameter",
+      "type": "uses"
+    },
+    {
+      "source": "Runner",
+      "target": "Sequential",
+      "type": "calls"
+    },
+    {
+      "source": "Runner",
+      "target": "FeaturedSpace",
+      "type": "uses"
+    },
+    {
+      "source": "Runner",
+      "target": "Extractor",
+      "type": "uses"
+    },
+    {
+      "source": "Runner",
+      "target": "GridSetFromFile",
+      "type": "uses"
+    },
+    {
+      "source": "Runner",
+      "target": "Project",
+      "type": "calls"
+    },
+    {
+      "source": "Runner",
+      "target": "PermutationImportance",
+      "type": "calls"
+    },
+    {
+      "source": "Runner",
+      "target": "Threshold",
+      "type": "calls"
+    },
+    {
+      "source": "Runner",
+      "target": "Novel",
+      "type": "calls"
+    },
+    {
+      "source": "Runner",
+      "target": "ResponsePlot",
+      "type": "calls"
+    },
+    {
+      "source": "Runner",
+      "target": "CsvWriter",
+      "type": "uses"
+    },
+    {
+      "source": "Runner",
+      "target": "ParallelRun",
+      "type": "uses"
+    },
+    {
+      "source": "Runner",
+      "target": "SampleSet2",
+      "type": "uses"
+    },
+    {
+      "source": "Runner",
+      "target": "SampleSet",
+      "type": "uses"
+    },
+    {
+      "source": "Runner",
+      "target": "Params",
+      "type": "uses"
+    },
+    {
+      "source": "Runner",
+      "target": "Sample",
+      "type": "uses"
+    },
+    {
+      "source": "Runner",
+      "target": "Feature",
+      "type": "uses"
+    },
+    {
+      "source": "Runner",
+      "target": "LinearFeature",
+      "type": "uses"
+    },
+    {
+      "source": "Runner",
+      "target": "SquareFeature",
+      "type": "uses"
+    },
+    {
+      "source": "Runner",
+      "target": "ProductFeature",
+      "type": "uses"
+    },
+    {
+      "source": "Runner",
+      "target": "ThrGeneratorFeature",
+      "type": "uses"
+    },
+    {
+      "source": "Runner",
+      "target": "HingeGeneratorFeature",
+      "type": "uses"
+    },
+    {
+      "source": "Runner",
+      "target": "BinaryFeature",
+      "type": "uses"
+    },
+    {
+      "source": "Runner",
+      "target": "PolyhedralFeature",
+      "type": "uses"
+    },
+    {
+      "source": "Runner",
+      "target": "Utils",
+      "type": "uses"
+    },
+    {
+      "source": "Runner",
+      "target": "Grid",
+      "type": "uses"
+    },
+    {
+      "source": "Runner",
+      "target": "GridIO",
+      "type": "uses"
+    },
+    {
+      "source": "Runner",
+      "target": "GridWriter",
+      "type": "uses"
+    },
+    {
+      "source": "Runner",
+      "target": "Layer",
+      "type": "uses"
+    },
+    {
+      "source": "Runner",
+      "target": "AvgStderr",
+      "type": "calls"
+    },
+    {
+      "source": "Sequential",
+      "target": "FeaturedSpace",
+      "type": "uses"
+    },
+    {
+      "source": "Sequential",
+      "target": "Feature",
+      "type": "uses"
+    },
+    {
+      "source": "Sequential",
+      "target": "FeatureGenerator",
+      "type": "uses"
+    },
+    {
+      "source": "Sequential",
+      "target": "DoubleIndexSort",
+      "type": "calls"
+    },
+    {
+      "source": "Sequential",
+      "target": "Params",
+      "type": "uses"
+    },
+    {
+      "source": "Sequential",
+      "target": "Utils",
+      "type": "uses"
+    },
+    {
+      "source": "FeaturedSpace",
+      "target": "Feature",
+      "type": "uses"
+    },
+    {
+      "source": "FeaturedSpace",
+      "target": "FeatureGenerator",
+      "type": "uses"
+    },
+    {
+      "source": "FeaturedSpace",
+      "target": "Sample",
+      "type": "uses"
+    },
+    {
+      "source": "FeaturedSpace",
+      "target": "Params",
+      "type": "uses"
+    },
+    {
+      "source": "FeaturedSpace",
+      "target": "Project",
+      "type": "calls"
+    },
+    {
+      "source": "FeaturedSpace",
+      "target": "ScaledFeature",
+      "type": "uses"
+    },
+    {
+      "source": "FeaturedSpace",
+      "target": "ClampedFeature",
+      "type": "uses"
+    },
+    {
+      "source": "FeaturedSpace",
+      "target": "HingeFeature",
+      "type": "uses"
+    },
+    {
+      "source": "FeaturedSpace",
+      "target": "ThresholdFeature",
+      "type": "uses"
+    },
+    {
+      "source": "FeaturedSpace",
+      "target": "BinaryFeature",
+      "type": "uses"
+    },
+    {
+      "source": "FeaturedSpace",
+      "target": "ProductFeature",
+      "type": "uses"
+    },
+    {
+      "source": "FeaturedSpace",
+      "target": "SquareFeature",
+      "type": "uses"
+    },
+    {
+      "source": "FeaturedSpace",
+      "target": "PolyhedralFeature",
+      "type": "uses"
+    },
+    {
+      "source": "FeaturedSpace",
+      "target": "ConstFeature",
+      "type": "uses"
+    },
+    {
+      "source": "FeaturedSpace",
+      "target": "Utils",
+      "type": "uses"
+    },
+    {
+      "source": "FeaturedSpace",
+      "target": "DoubleIterator",
+      "type": "uses"
+    },
+    {
+      "source": "FeaturedSpace",
+      "target": "GridSet",
+      "type": "uses"
+    },
+    {
+      "source": "SortedFeatureGenerator",
+      "target": "Feature",
+      "type": "uses"
+    },
+    {
+      "source": "SortedFeatureGenerator",
+      "target": "CachedFeature",
+      "type": "uses"
+    },
+    {
+      "source": "SortedFeatureGenerator",
+      "target": "Sample",
+      "type": "uses"
+    },
+    {
+      "source": "HingeFeatureGenerator",
+      "target": "HingeFeature",
+      "type": "uses"
+    },
+    {
+      "source": "HingeFeatureGenerator",
+      "target": "FeaturedSpace",
+      "type": "uses"
+    },
+    {
+      "source": "ThrFeatureGenerator",
+      "target": "ThresholdFeature",
+      "type": "uses"
+    },
+    {
+      "source": "ThrFeatureGenerator",
+      "target": "FeaturedSpace",
+      "type": "uses"
+    },
+    {
+      "source": "Extractor",
+      "target": "LazyGrid",
+      "type": "uses"
+    },
+    {
+      "source": "Extractor",
+      "target": "SampleSet2",
+      "type": "uses"
+    },
+    {
+      "source": "Extractor",
+      "target": "Sample",
+      "type": "uses"
+    },
+    {
+      "source": "Extractor",
+      "target": "Layer",
+      "type": "uses"
+    },
+    {
+      "source": "Extractor",
+      "target": "LayerFeature",
+      "type": "uses"
+    },
+    {
+      "source": "Extractor",
+      "target": "GridIO",
+      "type": "uses"
+    },
+    {
+      "source": "Extractor",
+      "target": "GridWriter",
+      "type": "uses"
+    },
+    {
+      "source": "Extractor",
+      "target": "Convert",
+      "type": "calls"
+    },
+    {
+      "source": "Extractor",
+      "target": "Utils",
+      "type": "uses"
+    },
+    {
+      "source": "Extractor",
+      "target": "Params",
+      "type": "uses"
+    },
+    {
+      "source": "Project",
+      "target": "Grid",
+      "type": "uses"
+    },
+    {
+      "source": "Project",
+      "target": "LazyGrid",
+      "type": "uses"
+    },
+    {
+      "source": "Project",
+      "target": "GridIO",
+      "type": "uses"
+    },
+    {
+      "source": "Project",
+      "target": "GridWriter",
+      "type": "uses"
+    },
+    {
+      "source": "Project",
+      "target": "GridSetFromFile",
+      "type": "uses"
+    },
+    {
+      "source": "Project",
+      "target": "Params",
+      "type": "uses"
+    },
+    {
+      "source": "Project",
+      "target": "Csv",
+      "type": "uses"
+    },
+    {
+      "source": "Project",
+      "target": "Utils",
+      "type": "uses"
+    },
+    {
+      "source": "Evaluate",
+      "target": "Project",
+      "type": "calls"
+    },
+    {
+      "source": "Evaluate",
+      "target": "Grid",
+      "type": "uses"
+    },
+    {
+      "source": "Evaluate",
+      "target": "Params",
+      "type": "uses"
+    },
+    {
+      "source": "PermutationImportance",
+      "target": "Evaluate",
+      "type": "calls"
+    },
+    {
+      "source": "PermutationImportance",
+      "target": "Feature",
+      "type": "uses"
+    },
+    {
+      "source": "PermutationImportance",
+      "target": "Sample",
+      "type": "uses"
+    },
+    {
+      "source": "PermutationImportance",
+      "target": "Csv",
+      "type": "uses"
+    },
+    {
+      "source": "PermutationImportance",
+      "target": "Stats",
+      "type": "calls"
+    },
+    {
+      "source": "PermutationImportance",
+      "target": "DoubleIndexSort",
+      "type": "calls"
+    },
+    {
+      "source": "AUC",
+      "target": "Extractor",
+      "type": "calls"
+    },
+    {
+      "source": "AUC",
+      "target": "Stats",
+      "type": "calls"
+    },
+    {
+      "source": "AUC",
+      "target": "Utils",
+      "type": "uses"
+    },
+    {
+      "source": "AvgStderr",
+      "target": "Project",
+      "type": "calls"
+    },
+    {
+      "source": "AvgStderr",
+      "target": "LazyGrid",
+      "type": "uses"
+    },
+    {
+      "source": "AvgStderr",
+      "target": "GridWriter",
+      "type": "uses"
+    },
+    {
+      "source": "AvgStderr",
+      "target": "Grid",
+      "type": "uses"
+    },
+    {
+      "source": "AvgStderr",
+      "target": "Params",
+      "type": "uses"
+    },
+    {
+      "source": "AvgStderr",
+      "target": "Layer",
+      "type": "uses"
+    },
+    {
+      "source": "Threshold",
+      "target": "LazyGrid",
+      "type": "uses"
+    },
+    {
+      "source": "Threshold",
+      "target": "GridByte",
+      "type": "uses"
+    },
+    {
+      "source": "Threshold",
+      "target": "GridWriter",
+      "type": "uses"
+    },
+    {
+      "source": "ResponsePlot",
+      "target": "Params",
+      "type": "uses"
+    },
+    {
+      "source": "NceasApply",
+      "target": "FeaturedSpace",
+      "type": "uses"
+    },
+    {
+      "source": "NceasApply",
+      "target": "GridSetDummy",
+      "type": "uses"
+    },
+    {
+      "source": "NceasApply",
+      "target": "Project",
+      "type": "calls"
+    },
+    {
+      "source": "NceasApply",
+      "target": "Runner",
+      "type": "calls"
+    },
+    {
+      "source": "NceasApply",
+      "target": "Sample",
+      "type": "uses"
+    },
+    {
+      "source": "NceasApply",
+      "target": "Csv",
+      "type": "uses"
+    },
+    {
+      "source": "Convert",
+      "target": "GridIO",
+      "type": "uses"
+    },
+    {
+      "source": "Convert",
+      "target": "LazyGrid",
+      "type": "uses"
+    },
+    {
+      "source": "Convert",
+      "target": "GridWriter",
+      "type": "uses"
+    },
+    {
+      "source": "Convert",
+      "target": "GridByte",
+      "type": "uses"
+    },
+    {
+      "source": "Convert",
+      "target": "GridUbyte",
+      "type": "uses"
+    },
+    {
+      "source": "Convert",
+      "target": "GridShort",
+      "type": "uses"
+    },
+    {
+      "source": "Convert",
+      "target": "GridInt",
+      "type": "uses"
+    },
+    {
+      "source": "Convert",
+      "target": "Utils",
+      "type": "uses"
+    },
+    {
+      "source": "GridIO",
+      "target": "Grid",
+      "type": "uses"
+    },
+    {
+      "source": "GridIO",
+      "target": "GridDimension",
+      "type": "uses"
+    },
+    {
+      "source": "GridIO",
+      "target": "GridByte",
+      "type": "uses"
+    },
+    {
+      "source": "GridIO",
+      "target": "GridShort",
+      "type": "uses"
+    },
+    {
+      "source": "GridIO",
+      "target": "GridInt",
+      "type": "uses"
+    },
+    {
+      "source": "GridIO",
+      "target": "GridUbyte",
+      "type": "uses"
+    },
+    {
+      "source": "GridIO",
+      "target": "GetIniValueParser",
+      "type": "uses"
+    },
+    {
+      "source": "GridIO",
+      "target": "LittleEndianInputStream",
+      "type": "uses"
+    },
+    {
+      "source": "GridIO",
+      "target": "MyScanner",
+      "type": "uses"
+    },
+    {
+      "source": "GridIO",
+      "target": "Utils",
+      "type": "uses"
+    },
+    {
+      "source": "GridIO",
+      "target": "RunLengthEncoding",
+      "type": "uses"
+    },
+    {
+      "source": "GridWriter",
+      "target": "Grid",
+      "type": "uses"
+    },
+    {
+      "source": "GridWriter",
+      "target": "GridDimension",
+      "type": "uses"
+    },
+    {
+      "source": "GridWriter",
+      "target": "LittleEndianOutputStream",
+      "type": "uses"
+    },
+    {
+      "source": "GridWriter",
+      "target": "Utils",
+      "type": "uses"
+    },
+    {
+      "source": "Grid",
+      "target": "GridDimension",
+      "type": "uses"
+    },
+    {
+      "source": "Grid",
+      "target": "LayerFeature",
+      "type": "uses"
+    },
+    {
+      "source": "Grid",
+      "target": "RunLengthEncoding",
+      "type": "uses"
+    },
+    {
+      "source": "Grid",
+      "target": "Sample",
+      "type": "uses"
+    },
+    {
+      "source": "LazyGrid",
+      "target": "Grid",
+      "type": "uses"
+    },
+    {
+      "source": "LazyGrid",
+      "target": "GridIO",
+      "type": "uses"
+    },
+    {
+      "source": "LazyGrid",
+      "target": "LittleEndianInputStream",
+      "type": "uses"
+    },
+    {
+      "source": "LazyGrid",
+      "target": "MyScanner",
+      "type": "uses"
+    },
+    {
+      "source": "GridSetFromFile",
+      "target": "Csv",
+      "type": "uses"
+    },
+    {
+      "source": "GridSetFromFile",
+      "target": "Grid",
+      "type": "uses"
+    },
+    {
+      "source": "GridSetFromFile",
+      "target": "Layer",
+      "type": "uses"
+    },
+    {
+      "source": "GridSetFromFile",
+      "target": "LayerFeature",
+      "type": "uses"
+    },
+    {
+      "source": "GridSetFromFile",
+      "target": "GridDimension",
+      "type": "uses"
+    },
+    {
+      "source": "GridSetFromFile",
+      "target": "SampleSet",
+      "type": "uses"
+    },
+    {
+      "source": "SampleSet",
+      "target": "Sample",
+      "type": "uses"
+    },
+    {
+      "source": "SampleSet",
+      "target": "GridDimension",
+      "type": "uses"
+    },
+    {
+      "source": "SampleSet",
+      "target": "DoubleIndexSort",
+      "type": "calls"
+    },
+    {
+      "source": "SampleSet",
+      "target": "GridByte",
+      "type": "uses"
+    },
+    {
+      "source": "SampleSet",
+      "target": "Utils",
+      "type": "uses"
+    },
+    {
+      "source": "SampleSet2",
+      "target": "Sample",
+      "type": "uses"
+    },
+    {
+      "source": "SampleSet2",
+      "target": "Csv",
+      "type": "uses"
+    },
+    {
+      "source": "SampleSet2",
+      "target": "Layer",
+      "type": "uses"
+    },
+    {
+      "source": "SampleSet2",
+      "target": "Params",
+      "type": "uses"
+    },
+    {
+      "source": "SampleSet2",
+      "target": "Utils",
+      "type": "uses"
+    },
+    {
+      "source": "SampleSet2",
+      "target": "GridDimension",
+      "type": "uses"
+    },
+    {
+      "source": "Params",
+      "target": "Parameter",
+      "type": "uses"
+    },
+    {
+      "source": "ParamsPre",
+      "target": "Parameter",
+      "type": "uses"
+    },
+    {
+      "source": "ParamsPre",
+      "target": "Csv",
+      "type": "uses"
+    },
+    {
+      "source": "ParamsPre",
+      "target": "Layer",
+      "type": "uses"
+    },
+    {
+      "source": "ParamsPre",
+      "target": "DirectorySelect",
+      "type": "uses"
+    },
+    {
+      "source": "ParamsPre",
+      "target": "FileSelect",
+      "type": "uses"
+    },
+    {
+      "source": "ParamsPre",
+      "target": "SampleSet2",
+      "type": "uses"
+    },
+    {
+      "source": "ParamsPre",
+      "target": "Utils",
+      "type": "uses"
+    },
+    {
+      "source": "Parameters",
+      "target": "Parameter",
+      "type": "uses"
+    },
+    {
+      "source": "Utils",
+      "target": "Grid",
+      "type": "uses"
+    },
+    {
+      "source": "Utils",
+      "target": "GridWriter",
+      "type": "uses"
+    },
+    {
+      "source": "Utils",
+      "target": "Display",
+      "type": "uses"
+    },
+    {
+      "source": "Utils",
+      "target": "DirectorySelect",
+      "type": "uses"
+    },
+    {
+      "source": "Utils",
+      "target": "SampleSet",
+      "type": "uses"
+    },
+    {
+      "source": "Utils",
+      "target": "Params",
+      "type": "uses"
+    },
+    {
+      "source": "Utils",
+      "target": "MyProgressMonitor",
+      "type": "uses"
+    },
+    {
+      "source": "Display",
+      "target": "Grid",
+      "type": "uses"
+    },
+    {
+      "source": "Display",
+      "target": "Sample",
+      "type": "uses"
+    },
+    {
+      "source": "Display",
+      "target": "GridDimension",
+      "type": "uses"
+    },
+    {
+      "source": "Display",
+      "target": "LazyGrid",
+      "type": "uses"
+    },
+    {
+      "source": "Display",
+      "target": "Utils",
+      "type": "uses"
+    },
+    {
+      "source": "Show",
+      "target": "Display",
+      "type": "uses"
+    },
+    {
+      "source": "Show",
+      "target": "Grid",
+      "type": "uses"
+    },
+    {
+      "source": "Show",
+      "target": "GridIO",
+      "type": "uses"
+    },
+    {
+      "source": "Show",
+      "target": "SampleSet",
+      "type": "uses"
+    },
+    {
+      "source": "Show",
+      "target": "SampleSet2",
+      "type": "uses"
+    },
+    {
+      "source": "Show",
+      "target": "GridWriter",
+      "type": "uses"
+    },
+    {
+      "source": "Show",
+      "target": "FileEntry",
+      "type": "uses"
+    },
+    {
+      "source": "Show",
+      "target": "Utils",
+      "type": "uses"
+    },
+    {
+      "source": "View",
+      "target": "GridZoom",
+      "type": "uses"
+    },
+    {
+      "source": "View",
+      "target": "Grid",
+      "type": "uses"
+    },
+    {
+      "source": "View",
+      "target": "GridIO",
+      "type": "uses"
+    },
+    {
+      "source": "View",
+      "target": "Utils",
+      "type": "uses"
+    },
+    {
+      "source": "GridZoom",
+      "target": "Grid",
+      "type": "uses"
+    },
+    {
+      "source": "Zoom",
+      "target": "Object",
+      "type": "uses"
+    },
+    {
+      "source": "Explain",
+      "target": "Project",
+      "type": "uses"
+    },
+    {
+      "source": "Explain",
+      "target": "Grid",
+      "type": "uses"
+    },
+    {
+      "source": "Explain",
+      "target": "GridIO",
+      "type": "uses"
+    },
+    {
+      "source": "Explain",
+      "target": "GridZoom",
+      "type": "uses"
+    },
+    {
+      "source": "Explain",
+      "target": "ResponsePlot",
+      "type": "uses"
+    },
+    {
+      "source": "Explain",
+      "target": "Runner",
+      "type": "calls"
+    },
+    {
+      "source": "Explain",
+      "target": "Params",
+      "type": "uses"
+    },
+    {
+      "source": "Explain",
+      "target": "Csv",
+      "type": "uses"
+    },
+    {
+      "source": "Explain",
+      "target": "Utils",
+      "type": "uses"
+    },
+    {
+      "source": "Explainold",
+      "target": "Project",
+      "type": "uses"
+    },
+    {
+      "source": "Explainold",
+      "target": "GridZoom",
+      "type": "uses"
+    },
+    {
+      "source": "Explainold",
+      "target": "ResponsePlot",
+      "type": "uses"
+    },
+    {
+      "source": "Explainold",
+      "target": "Csv",
+      "type": "uses"
+    },
+    {
+      "source": "Explainold",
+      "target": "Params",
+      "type": "uses"
+    },
+    {
+      "source": "Explainold",
+      "target": "Utils",
+      "type": "uses"
+    },
+    {
+      "source": "FileSelect",
+      "target": "Csv",
+      "type": "uses"
+    },
+    {
+      "source": "FileSelect",
+      "target": "SampleSet",
+      "type": "uses"
+    },
+    {
+      "source": "DirectorySelect",
+      "target": "Csv",
+      "type": "uses"
+    },
+    {
+      "source": "DirectorySelect",
+      "target": "SampleSet",
+      "type": "uses"
+    },
+    {
+      "source": "DirectorySelect",
+      "target": "Utils",
+      "type": "uses"
+    },
+    {
+      "source": "DirectorySelect",
+      "target": "FileEntry",
+      "type": "uses"
+    },
+    {
+      "source": "PermutationImportance",
+      "target": "Stats",
+      "type": "calls"
+    },
+    {
+      "source": "Eval",
+      "target": "Stats",
+      "type": "calls"
+    },
+    {
+      "source": "Eval",
+      "target": "ToolsUtils",
+      "type": "uses"
+    },
+    {
+      "source": "Eval",
+      "target": "CsvOnePass",
+      "type": "uses"
+    },
+    {
+      "source": "JackAUC",
+      "target": "Stats",
+      "type": "calls"
+    },
+    {
+      "source": "JackAUC",
+      "target": "GridIO",
+      "type": "uses"
+    },
+    {
+      "source": "JackAUC",
+      "target": "SampleSet2",
+      "type": "uses"
+    },
+    {
+      "source": "PMedian",
+      "target": "ToolsUtils",
+      "type": "uses"
+    },
+    {
+      "source": "PMedianRand",
+      "target": "PMedian",
+      "type": "calls"
+    },
+    {
+      "source": "PMedianRand",
+      "target": "ToolsUtils",
+      "type": "uses"
+    },
+    {
+      "source": "RandomSample",
+      "target": "Extractor",
+      "type": "calls"
+    },
+    {
+      "source": "RandomSample",
+      "target": "SampleSet",
+      "type": "uses"
+    },
+    {
+      "source": "RandomSample3",
+      "target": "Grid",
+      "type": "uses"
+    },
+    {
+      "source": "RandomSample3",
+      "target": "GridIO",
+      "type": "uses"
+    },
+    {
+      "source": "RandomSample2",
+      "target": "Grid",
+      "type": "uses"
+    },
+    {
+      "source": "RandomSample2",
+      "target": "GridIO",
+      "type": "uses"
+    },
+    {
+      "source": "Coarsen",
+      "target": "Grid",
+      "type": "uses"
+    },
+    {
+      "source": "Coarsen",
+      "target": "GridIO",
+      "type": "uses"
+    },
+    {
+      "source": "Convert",
+      "target": "Coarsen",
+      "type": "uses"
+    },
+    {
+      "source": "Histogram",
+      "target": "LazyGrid",
+      "type": "uses"
+    },
+    {
+      "source": "Histogram",
+      "target": "SampleSet2",
+      "type": "uses"
+    },
+    {
+      "source": "Histogram",
+      "target": "Layer",
+      "type": "uses"
+    },
+    {
+      "source": "Histogram",
+      "target": "Sample",
+      "type": "uses"
+    },
+    {
+      "source": "Interpolate",
+      "target": "Grid",
+      "type": "uses"
+    },
+    {
+      "source": "Interpolate",
+      "target": "GridIO",
+      "type": "uses"
+    },
+    {
+      "source": "Interpolate",
+      "target": "GridWriter",
+      "type": "uses"
+    },
+    {
+      "source": "Jiggle",
+      "target": "Grid",
+      "type": "uses"
+    },
+    {
+      "source": "Jiggle",
+      "target": "GridIO",
+      "type": "uses"
+    },
+    {
+      "source": "Jiggle",
+      "target": "Csv",
+      "type": "uses"
+    },
+    {
+      "source": "LimitingFactor",
+      "target": "Project",
+      "type": "uses"
+    },
+    {
+      "source": "LimitingFactor",
+      "target": "LazyGrid",
+      "type": "uses"
+    },
+    {
+      "source": "LimitingFactor",
+      "target": "GridWriter",
+      "type": "uses"
+    },
+    {
+      "source": "LimitingFactor",
+      "target": "Csv",
+      "type": "uses"
+    },
+    {
+      "source": "LimitingFactor",
+      "target": "Display",
+      "type": "uses"
+    },
+    {
+      "source": "LimitingFactor",
+      "target": "Params",
+      "type": "uses"
+    },
+    {
+      "source": "Mask",
+      "target": "LazyGrid",
+      "type": "uses"
+    },
+    {
+      "source": "Mask",
+      "target": "Grid",
+      "type": "uses"
+    },
+    {
+      "source": "Mask",
+      "target": "GridWriter",
+      "type": "uses"
+    },
+    {
+      "source": "Mid",
+      "target": "Extractor",
+      "type": "uses"
+    },
+    {
+      "source": "Mid",
+      "target": "GridIO",
+      "type": "uses"
+    },
+    {
+      "source": "Mid",
+      "target": "Layer",
+      "type": "uses"
+    },
+    {
+      "source": "Mid",
+      "target": "Feature",
+      "type": "uses"
+    },
+    {
+      "source": "Mid",
+      "target": "Utils",
+      "type": "uses"
+    },
+    {
+      "source": "Novel",
+      "target": "Grid",
+      "type": "uses"
+    },
+    {
+      "source": "Novel",
+      "target": "LazyGrid",
+      "type": "uses"
+    },
+    {
+      "source": "Novel",
+      "target": "Feature",
+      "type": "uses"
+    },
+    {
+      "source": "Novel",
+      "target": "Display",
+      "type": "uses"
+    },
+    {
+      "source": "Novel",
+      "target": "Extractor",
+      "type": "calls"
+    },
+    {
+      "source": "Novel",
+      "target": "GridIO",
+      "type": "uses"
+    },
+    {
+      "source": "Novel",
+      "target": "Utils",
+      "type": "uses"
+    },
+    {
+      "source": "Plus",
+      "target": "LazyGrid",
+      "type": "uses"
+    },
+    {
+      "source": "Plus",
+      "target": "Grid",
+      "type": "uses"
+    },
+    {
+      "source": "Plus",
+      "target": "GridWriter",
+      "type": "uses"
+    },
+    {
+      "source": "RestrictToOccupied",
+      "target": "Grid",
+      "type": "uses"
+    },
+    {
+      "source": "RestrictToOccupied",
+      "target": "GridIO",
+      "type": "uses"
+    },
+    {
+      "source": "RestrictToOccupied",
+      "target": "SampleSet",
+      "type": "uses"
+    },
+    {
+      "source": "RestrictToOccupied",
+      "target": "SampleSet2",
+      "type": "uses"
+    },
+    {
+      "source": "RestrictToOccupied",
+      "target": "Sample",
+      "type": "uses"
+    },
+    {
+      "source": "RestrictToOccupied",
+      "target": "NodePriorityQueue",
+      "type": "uses"
+    },
+    {
+      "source": "RestrictToOccupied",
+      "target": "Node",
+      "type": "uses"
+    },
+    {
+      "source": "NodePriorityQueue",
+      "target": "Node",
+      "type": "uses"
+    },
+    {
+      "source": "Reduce",
+      "target": "Grid",
+      "type": "uses"
+    },
+    {
+      "source": "Reduce",
+      "target": "GridIO",
+      "type": "uses"
+    },
+    {
+      "source": "Reduce",
+      "target": "GridWriter",
+      "type": "uses"
+    },
+    {
+      "source": "Reproject",
+      "target": "Grid",
+      "type": "uses"
+    },
+    {
+      "source": "Reproject",
+      "target": "GridIO",
+      "type": "uses"
+    },
+    {
+      "source": "Reproject",
+      "target": "GridWriter",
+      "type": "uses"
+    },
+    {
+      "source": "Scatter",
+      "target": "Grid",
+      "type": "uses"
+    },
+    {
+      "source": "Scatter",
+      "target": "GridIO",
+      "type": "uses"
+    },
+    {
+      "source": "SubSample",
+      "target": "Convert",
+      "type": "calls"
+    },
+    {
+      "source": "SubSample",
+      "target": "Grid",
+      "type": "uses"
+    },
+    {
+      "source": "SubSample",
+      "target": "GridByte",
+      "type": "uses"
+    },
+    {
+      "source": "SubSample",
+      "target": "GridShort",
+      "type": "uses"
+    },
+    {
+      "source": "SubSample",
+      "target": "GridInt",
+      "type": "uses"
+    },
+    {
+      "source": "SubSample",
+      "target": "GridDouble",
+      "type": "uses"
+    },
+    {
+      "source": "SubSample",
+      "target": "GridUbyte",
+      "type": "uses"
+    },
+    {
+      "source": "SubSample",
+      "target": "GridWriter",
+      "type": "uses"
+    },
+    {
+      "source": "Sum",
+      "target": "Grid",
+      "type": "uses"
+    },
+    {
+      "source": "Sum",
+      "target": "GridIO",
+      "type": "uses"
+    },
+    {
+      "source": "ToolsThreshold",
+      "target": "Grid",
+      "type": "uses"
+    },
+    {
+      "source": "ToolsThreshold",
+      "target": "GridIO",
+      "type": "uses"
+    },
+    {
+      "source": "ToBoolean",
+      "target": "Grid",
+      "type": "uses"
+    },
+    {
+      "source": "ToBoolean",
+      "target": "GridIO",
+      "type": "uses"
+    },
+    {
+      "source": "ToBoolean",
+      "target": "GridWriter",
+      "type": "uses"
+    },
+    {
+      "source": "ToBRTFormat",
+      "target": "Extractor",
+      "type": "calls"
+    },
+    {
+      "source": "ToBRTFormat",
+      "target": "Grid",
+      "type": "uses"
+    },
+    {
+      "source": "ToBRTFormat",
+      "target": "LazyGrid",
+      "type": "uses"
+    },
+    {
+      "source": "ToBRTFormat",
+      "target": "GridWriter",
+      "type": "uses"
+    },
+    {
+      "source": "ToBRTFormat",
+      "target": "Layer",
+      "type": "uses"
+    },
+    {
+      "source": "ToBRTFormat",
+      "target": "Sample",
+      "type": "uses"
+    },
+    {
+      "source": "ToBRTFormat",
+      "target": "Feature",
+      "type": "uses"
+    },
+    {
+      "source": "Union",
+      "target": "Grid",
+      "type": "uses"
+    },
+    {
+      "source": "Union",
+      "target": "GridIO",
+      "type": "uses"
+    },
+    {
+      "source": "Union",
+      "target": "GridWriter",
+      "type": "uses"
+    },
+    {
+      "source": "Correlation",
+      "target": "Grid",
+      "type": "uses"
+    },
+    {
+      "source": "Correlation",
+      "target": "GridIO",
+      "type": "uses"
+    },
+    {
+      "source": "Correlation",
+      "target": "Stats",
+      "type": "calls"
+    },
+    {
+      "source": "Count",
+      "target": "LazyGrid",
+      "type": "uses"
+    },
+    {
+      "source": "Count",
+      "target": "Grid",
+      "type": "uses"
+    },
+    {
+      "source": "Csv2Grid",
+      "target": "LazyGrid",
+      "type": "uses"
+    },
+    {
+      "source": "Csv2Grid",
+      "target": "Grid",
+      "type": "uses"
+    },
+    {
+      "source": "Csv2Grid",
+      "target": "GridWriter",
+      "type": "uses"
+    },
+    {
+      "source": "Csv2Grid",
+      "target": "CsvOnePass",
+      "type": "uses"
+    },
+    {
+      "source": "CsvToGrid",
+      "target": "Csv",
+      "type": "uses"
+    },
+    {
+      "source": "CsvToGrid",
+      "target": "Grid",
+      "type": "uses"
+    },
+    {
+      "source": "CsvToGrid",
+      "target": "GridIO",
+      "type": "uses"
+    },
+    {
+      "source": "CsvToGrid",
+      "target": "GridWriter",
+      "type": "uses"
+    },
+    {
+      "source": "Dimensions",
+      "target": "LazyGrid",
+      "type": "uses"
+    },
+    {
+      "source": "Dimensions",
+      "target": "Grid",
+      "type": "uses"
+    },
+    {
+      "source": "FilterSamples",
+      "target": "SampleSet",
+      "type": "uses"
+    },
+    {
+      "source": "FilterSamples",
+      "target": "SampleSet2",
+      "type": "uses"
+    },
+    {
+      "source": "FromBRTFormat",
+      "target": "LazyGrid",
+      "type": "uses"
+    },
+    {
+      "source": "FromBRTFormat",
+      "target": "Grid",
+      "type": "uses"
+    },
+    {
+      "source": "FromBRTFormat",
+      "target": "GridWriter",
+      "type": "uses"
+    },
+    {
+      "source": "GetvalAll",
+      "target": "LazyGrid",
+      "type": "uses"
+    },
+    {
+      "source": "Addconstant",
+      "target": "LazyGrid",
+      "type": "uses"
+    },
+    {
+      "source": "Addconstant",
+      "target": "Grid",
+      "type": "uses"
+    },
+    {
+      "source": "Addconstant",
+      "target": "GridWriter",
+      "type": "uses"
+    },
+    {
+      "source": "Checkerboard",
+      "target": "LazyGrid",
+      "type": "uses"
+    },
+    {
+      "source": "Checkerboard",
+      "target": "Csv",
+      "type": "uses"
+    },
+    {
+      "source": "Checkerboard",
+      "target": "GridDimension",
+      "type": "uses"
+    },
+    {
+      "source": "DeBiasedFeature",
+      "target": "Sample",
+      "type": "uses"
+    },
+    {
+      "source": "FileSelectPlaceholder",
+      "target": "Extractor",
+      "type": "calls"
+    },
+    {
+      "source": "FileSelectPlaceholder",
+      "target": "SampleSet",
+      "type": "uses"
+    },
+    {
+      "source": "MaxEnt",
+      "target": "Getopt",
+      "type": "uses"
+    },
+    {
+      "source": "AUC",
+      "target": "Getopt",
+      "type": "uses"
+    },
+    {
+      "source": "AvgStderr",
+      "target": "Getopt",
+      "type": "uses"
+    },
+    {
+      "source": "Convert",
+      "target": "Getopt",
+      "type": "uses"
+    },
+    {
+      "source": "Show",
+      "target": "Getopt",
+      "type": "uses"
+    },
+    {
+      "source": "Explain",
+      "target": "Getopt",
+      "type": "uses"
+    },
+    {
+      "source": "Explainold",
+      "target": "Getopt",
+      "type": "uses"
+    }
+  ]
+}
